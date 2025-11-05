@@ -1,0 +1,19 @@
+substitutions:
+  pool_prefix: "pool_"
+
+switch:
+  - platform: template
+    name: "${pool_prefix}auto"
+    id: pool_auto
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+# später:
+# sensor:
+#   - platform: modbus_controller  # pH
+#   - platform: modbus_controller  # ORP
+# switch:
+#   - platform: gpio  # Filterpumpe
+# script:
+#   - id: pool_regel
+

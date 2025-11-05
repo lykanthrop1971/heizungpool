@@ -1,0 +1,2687 @@
+esphome:
+  on_boot:
+    priority: 600
+    then:
+      - delay: 1s
+      - script.execute: init_mischer_position
+      - lambda: |-
+          // Modus nach Boot konsistent herstellen (inkl. Auto-Logik)
+          std::string sel = id(heizmodus_select).state;
+          if (sel.empty()) sel = "auto";  // neu: Default "auto" statt "summer"
+          ESP_LOGI("Boot","Heizmodus-Select=%s -> berechne effektiven Modus", sel.c_str());
+      - script.execute: saison_update_logic
+      - lambda: |-
+          // Sanity für Reglerzustände
+          if (!std::isfinite(id(mixer_trim)))   id(mixer_trim) = 0.0f;
+          if (!std::isfinite(id(pid_integral))) id(pid_integral) = 0.0f;
+          if (!std::isfinite(id(pid_prev_ist))) id(pid_prev_ist) = 0.0f;
+
+          // Warten, bis restore_value geladen ist (max. 500ms)
+          int tries = 0;
+          while (!std::isfinite(id(mischer_position)) && tries < 10) {
+            delay(50);
+            tries++;
+          }
+          if (!std::isfinite(id(mischer_position)) ||
+              id(mischer_position) < 0.0f || id(mischer_position) > 100.0f) {
+            id(mischer_position) = 50.0f;
+            ESP_LOGW("Boot","mischer_position invalid at boot -> 50%%");
+          }
+          float out_pct = id(mischer_position);
+          id(gp8403_output_1).set_level(out_pct / 100.0f);
+          id(mischer_position_sensor).publish_state(out_pct);
+          ESP_LOGI("Boot","Restored mixer to %.1f%% (no extra invert)", out_pct);
+      - lambda: |-
+          uint8_t buf[4];
+          auto dev = id(eeprom);
+          if (dev->read(buf, sizeof(buf)) == esphome::i2c::ErrorCode::ERROR_OK) {
+            float val;
+            memcpy(&val, buf, sizeof(val));
+            if (std::isfinite(val) && val >= 0.0f && val < 100000.0f) {
+              id(brenner_betriebsstunden) = val;
+              ESP_LOGI("FRAM", "Brenner-Betriebsstunden geladen: %.2f h", val);
+            }
+          }
+      - lambda: |-
+          uint8_t buf[4];
+          auto dev = id(eeprom);
+          uint8_t addr[2] = {0x00, 0x10};
+          if (dev->write(addr, 2) == esphome::i2c::ErrorCode::ERROR_OK &&
+              dev->read(buf, sizeof(buf)) == esphome::i2c::ErrorCode::ERROR_OK) {
+            float val;
+            memcpy(&val, buf, sizeof(val));
+            if (std::isfinite(val) && val >= 30.0f && val <= 80.0f) {
+              id(warmwasser_zieltemperatur) = val;
+              ESP_LOGI("FRAM", "Warmwasser-Zieltemperatur geladen: %.2f °C", val);
+            }
+          }
+      - lambda: |-
+          if (!std::isfinite(id(mixer_trim))) {
+            id(mixer_trim) = 0.0f;
+            ESP_LOGW("Boot","mixer_trim invalid at boot -> 0");
+          }
+          if (!std::isfinite(id(mischer_position))) {
+            id(mischer_position) = 50.0f;
+            ESP_LOGW("Boot","mischer_position invalid at boot -> 50%%");
+          }
+          if (!std::isfinite(id(pid_integral))) id(pid_integral) = 0.0f;
+      - lambda: |-
+          if (std::isfinite(id(curve_slope))) {
+            id(curve_slope_num).publish_state(id(curve_slope));
+          }
+          if (std::isfinite(id(curve_level))) {
+            id(curve_level_num).publish_state(id(curve_level));
+          }
+      - lambda: |-
+          float hv = id(kessel_hysterese_winter);
+          if (!std::isfinite(hv) || hv < 0.1f) hv = 2.0f;
+          id(kessel_hysterese_num).publish_state(hv);
+          ESP_LOGI("Boot","Hysterese restored/synced: %.1f K", hv);
+
+external_components:
+  - source:
+      type: local
+      path: ./components
+
+web_server:
+  port: 80
+  auth:
+    username: admin
+    password: heizung123
+  include_internal: true
+  local: true
+  css_include: webserver.css
+  js_include: webserver.js
+
+i2c:
+  sda: 12
+  scl: 11
+  scan: true
+  id: bus_a
+
+i2c_device:
+  - id: eeprom
+    address: 0x51
+
+pcf8574:
+  - id: 'pcf8574_hub_out_1'
+    address: 0x24
+  - id: 'pcf8574_hub_in_1'
+    address: 0x22
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_small
+    size: 12
+  - file: "gfonts://Roboto"
+    id: font_big
+    size: 12
+
+uart:
+  - id: uart_nextion
+    tx_pin: 13
+    rx_pin: 14
+    baud_rate: 115200
+  - id: uart_rs485
+    tx_pin: 17
+    rx_pin: 18
+    baud_rate: 9600
+    stop_bits: 1
+    parity: NONE
+
+modbus:
+  id: modbus_bus
+  uart_id: uart_rs485
+
+modbus_controller:
+  - id: mb_ctrl
+    address: 1
+    modbus_id: modbus_bus
+    setup_priority: -10
+    update_interval: 2s
+    command_throttle: 200ms
+  - id: tuf2000m
+    address: 2
+    modbus_id: modbus_bus
+    update_interval: 5s
+
+gp8403:
+  id: my_gp8403
+  voltage: 10V
+
+output:
+  - platform: gp8403
+    id: gp8403_output_1
+    gp8403_id: my_gp8403
+    channel: 0
+  - platform: gp8403
+    id: gp8403_output_2
+    gp8403_id: my_gp8403
+    channel: 1
+
+# ---------------------------------------------------------
+# AB HIER fügst du deinen kompletten restlichen Code ein
+# (display: nextion ..., globals: ..., select:, switch:, binary_sensor:,
+# script:, button:, sensor:, text_sensor:, number:, time:, interval: ...)
+# genau so, wie du ihn im großen Block geschickt hast.
+# Die Struktur oben reicht, damit das Paket korrekt eingebunden wird.
+# ---------------------------------------------------------
+display:
+  - platform: nextion
+    id: nextion_display
+    uart_id: uart_nextion
+    on_setup:
+      then:
+        - lambda: |-
+            id(nextion_display).send_command("bkcmd=3");
+
+    lambda: |-
+      it.set_component_text("t_title", "HEIZUNG");
+    # Serve the TFT from HA (http or https). http is faster on small MCUs.
+    tft_url: http://192.168.1.56:8123/local/tft/heizung.tft
+    # optional: choose a page at connect
+    start_up_page: 0
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    id: oled
+    rotation: 0
+    lambda: |-
+      it.printf(0, 0, id(font_big), "AF");
+      it.printf(32, 0, id(font_big), "VL");
+      it.printf(64, 0, id(font_big), "WW");
+      it.printf(96, 0, id(font_big), "KF");
+      it.printf(0, 12, id(font_big), "%.1f", id(outdoor).state);
+      it.printf(32, 12, id(font_big), "%.1f", id(vorlauftemperatur).state);
+      it.printf(64, 12, id(font_big), "%.1f", id(warmwassertemperatur).state);
+      it.printf(96, 12, id(font_big), "%.1f", id(kesseltemperatur).state);
+      
+      std::string sel = id(heizmodus_select).state;
+      bool is_w_auto = id(saison_auto_is_winter);
+
+      // 2-Buchstaben-Kürzel:
+      // WI = Winter, SU = Sommer, AW = Auto(Winter), AS = Auto(Sommer), PO = Pool
+      const char* mode_short = "--";
+      if (sel == "pool")      mode_short = "PO";
+      else if (sel == "winter") mode_short = "WI";
+      else if (sel == "summer") mode_short = "SU";
+      else                      mode_short = is_w_auto ? "AW" : "AS";
+
+      it.printf(0, 24, id(font_small), "%s", mode_short);
+      it.printf(32, 24, id(font_big), "%.1f", id(zieltemperatur));
+      it.printf(64, 24, id(font_big), "%.1f", id(warmwasser_zieltemperatur));
+      it.printf(96, 24, id(font_big), "%.1f", id(vessel_soll));
+
+      // Startposition für die Zeile
+      int x = 0;
+      int y = 36; // z.B. unterste Zeile
+
+      // Mischer Auf ("A")
+      if (id(mischer_auf).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "A");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "A");
+      }
+      x += 14;
+
+      // Mischer Zu ("Z")
+      if (id(mischer_zu).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "Z");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "Z");
+      }
+      x += 14;
+
+      // Heizkreispumpe ("H")
+      if (id(heizkreispumpe).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "H");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "H");
+      }
+      x += 14;
+
+      // Warmwasserpumpe ("W")
+      if (id(warmwasserpumpe).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "W");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "W");
+      }
+      x += 14;
+
+      // Brenner ("B")
+      if (id(brenner).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "B");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "B");
+      }
+globals:
+  - id: last_hmi_mode_ms
+    type: unsigned long
+    restore_value: no
+    initial_value: '0'
+  - id: vessel_soll
+    type: float
+    restore_value: true
+    initial_value: '65.0'     # helper var: current active boiler target
+
+  # Per-mode adjustable boiler setpoints (defaults reflect your previous constants)
+  - id: kessel_soll_summer_idle
+    type: float
+    restore_value: true
+    initial_value: '40.0'     # summer when no DHW demand
+
+  - id: kessel_soll_summer_ww
+    type: float
+    restore_value: true
+    initial_value: '65.0'     # summer while heating DHW
+
+  - id: kessel_soll_winter
+    type: float
+    restore_value: true
+    initial_value: '65.0'
+
+  - id: kessel_soll_pool
+    type: float
+    restore_value: true
+    initial_value: '80.0'
+  - id: zieltemperatur
+    type: float
+    restore_value: true
+    initial_value: '40.0'
+  - id: pid_integral
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  - id: pid_last_error
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  - id: pid_output
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  - id: pid_kp
+    type: float
+    restore_value: true
+    initial_value: '0.80'      # vorher 1.2 → weniger aggressiv
+  - id: pid_ki
+    type: float
+    restore_value: true
+    initial_value: '0.0020'    # vorher 0.005 → deutlich weniger Aufintegrieren
+  - id: pid_kd
+    type: float
+    restore_value: true
+    initial_value: '8.0'      # etwas mehr Dämpfung
+
+  # Anti-Windup & Totzone
+  - id: pid_integral_limit
+    type: float
+    restore_value: true
+    initial_value: '600.0'      # Integralklammer (±)
+  - id: pid_deadband_c
+    type: float
+    restore_value: true
+    initial_value: '0.1'       # Totzone um den Sollwert (°C)
+  # Derivative mit Messwert (ruhiger)
+  - id: pid_prev_ist
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: warmwasser_zieltemperatur
+    type: float
+    restore_value: true
+    initial_value: '50.0'
+  - id: heizmodus
+    type: std::string
+    restore_value: true
+    initial_value: '"summer"'
+  - id: mischer_position
+    type: float
+    restore_value: true
+    initial_value: '50.0'
+  - id: invalid_sensor_count
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: warmwasser_zieltemperatur_backup
+    type: float
+    restore_value: false
+    initial_value: '50.0'
+  - id: brenner_betriebsstunden
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  - id: ctrl_last_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  # - id: burner_was_on
+  #   type: bool
+  #   restore_value: false
+  #   initial_value: 'false'
+  # - id: burner_boost_until_ms
+  #   type: uint32_t
+  #   restore_value: false
+  #   initial_value: '0'
+  - id: mixer_trim
+    type: float
+    restore_value: true
+    initial_value: '0.0'
+  - id: prev_kessel_temp
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  - id: burn_last_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+  - id: burn_unsaved_h
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+  
+  # --- Heizkurve
+  - id: curve_slope
+    type: float
+    restore_value: yes
+    initial_value: '1.30'      # Radiator ~1.2–1.6 / FBH ~0.5–0.9
+  - id: curve_level
+    type: float
+    restore_value: yes
+    initial_value: '5.0'
+  - id: curve_t_design
+    type: float
+    restore_value: yes
+    initial_value: '-12.0'     # Auslegungs-Außentemperatur
+  - id: curve_t_min
+    type: float
+    restore_value: yes
+    initial_value: '25.0'      # FBH: 25–30 / Radiator: 35–45
+  - id: curve_t_max
+    type: float
+    restore_value: yes
+    initial_value: '65.0'      # FBH: 35–40 / Radiator: 60–70
+  - id: curve_heat_limit
+    type: float
+    restore_value: yes
+    initial_value: '18.0'      # Sommerabschaltungsschwelle (AT)
+  - id: curve_enable
+    type: bool
+    restore_value: yes
+    initial_value: 'true'      # Heizkurve standardmäßig aktiv
+  - id: curve_manual_winter_sp
+    type: float
+    restore_value: true
+    initial_value: '40.0'
+
+  - id: boiler_headroom
+    type: float
+    restore_value: true
+    initial_value: '10.0'   # Kessel soll typ. 5–10 K über VL-Soll liegen
+
+  - id: kessel_hysterese
+    type: float
+    restore_value: true
+    initial_value: '15.0'     # Default: 2 K
+  - id: kessel_hysterese_winter
+    type: float
+    restore_value: true
+    initial_value: '15.0'     # Default: 2 K
+  - id: saison_auto_is_winter
+    type: bool
+    restore_value: yes
+    initial_value: "true"
+  
+
+  # --- Modbus temp guards: last valid, time, EMA, invalid counters ---
+  # Vorlauf
+  - { id: g_vl_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_vl_ms,   type: uint32_t, initial_value: "0" }
+  - { id: g_vl_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_vl_inv,  type: int, initial_value: "0" }
+  # Kessel
+  - { id: g_k_last,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_k_ms,    type: uint32_t, initial_value: "0" }
+  - { id: g_k_ema,   type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_k_inv,   type: int, initial_value: "0" }
+  # Warmwasser
+  - { id: g_ww_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_ww_ms,   type: uint32_t, initial_value: "0" }
+  - { id: g_ww_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_ww_inv,  type: int, initial_value: "0" }
+  # Außen
+  - { id: g_out_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_out_ms,   type: uint32_t, initial_value: "0" }
+  - { id: g_out_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_out_inv,  type: int, initial_value: "0" }
+  # Temp5..8
+  - { id: g_t5_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t5_ms,   type: uint32_t, initial_value: "0" }
+  - { id: g_t5_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t5_inv,  type: int, initial_value: "0" }
+  - { id: g_t6_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t6_ms,   type: uint32_t, initial_value: "0" }
+  - { id: g_t6_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t6_inv,  type: int, initial_value: "0" }
+  - { id: g_t7_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t7_ms,   type: uint32_t, initial_value: "0" }
+  - { id: g_t7_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t7_inv,  type: int, initial_value: "0" }
+  - { id: g_t8_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t8_ms,   type: uint32_t, initial_value: "0" }
+  - { id: g_t8_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t8_inv,  type: int, initial_value: "0" }
+
+  - id: reg_ewma_err2
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+
+  - id: move_rate_ewma   # %/s (später *3600 -> %/h)
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+
+  - id: last_metrics_out # letzte ausgegebene Mischerposition (%)
+    type: float
+    restore_value: no
+    initial_value: "50.0"
+
+  - id: last_publish_metrics_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  # Oszillations-Detektor
+  - id: osc_prev_sign
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: osc_last_cross_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: osc_period_ema
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: osc_amp_ema
+    type: float
+    restore_value: no
+    initial_value: "0.0"
+  - id: osc_peak_pos
+    type: float
+    restore_value: no
+    initial_value: "-1e9"
+  - id: osc_peak_neg
+    type: float
+    restore_value: no
+    initial_value: "1e9"
+
+
+select:
+  - platform: template
+    name: "Heizmodus"
+    id: heizmodus_select
+    optimistic: true
+    restore_value: true
+    options: ["auto","summer","winter","pool"]
+    on_value:
+      then:
+        - script.execute: saison_update_logic
+
+# Individual outputs
+switch:
+  - platform: gpio
+    name: "a6-light1"
+    id: light1
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 5
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Mischer Auf"
+    id: mischer_auf
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 4
+      mode: OUTPUT
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    interlock: [mischer_zu]         # <-- NEU
+    on_turn_on:
+      - logger.log: "Mischer Auf wird EIN geschaltet"
+    on_turn_off:
+      - logger.log: "Mischer Auf wird AUS geschaltet"
+  - platform: gpio
+    name: "Mischer Zu"
+    id: mischer_zu
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 3
+      mode: OUTPUT
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    interlock: [mischer_auf]        # <-- NEU
+    on_turn_on:
+      - logger.log: "Mischer Zu wird EIN geschaltet"
+    on_turn_off:
+      - logger.log: "Mischer Zu wird AUS geschaltet"
+  - platform: gpio
+    name: "Warmwasserpumpe"
+    id: warmwasserpumpe
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 2
+      mode: OUTPUT
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - logger.log: "Warmwasserpumpe wird EIN geschaltet"
+    on_turn_off:
+      - logger.log: "Warmwasserpumpe wird AUS geschaltet"
+  - platform: gpio
+    name: "Heizkreispumpe"
+    id: heizkreispumpe
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 1
+      mode: OUTPUT
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - logger.log: "Heizkreispumpe wird EIN geschaltet"
+    on_turn_off:
+      - logger.log: "Heizkreispumpe wird AUS geschaltet"
+  - platform: gpio
+    name: "Brenner"
+    id: brenner
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 0
+      mode: OUTPUT
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - logger.log: "Brenner wird EIN geschaltet"
+    on_turn_off:
+      - logger.log: "Brenner wird AUS geschaltet"
+  - platform: template
+    name: "Legionellenschaltung aktiv"
+    id: legionellen_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON  # Standard: aktiv nach Neustart
+
+  # Fixed inversion state, internal — keep the same ID
+  # Set restore_mode to ALWAYS_OFF for normal direction (no invert),
+  # or ALWAYS_ON if your valve needs inversion.
+  - platform: template
+    name: "Mischer invertieren"
+    id: mixer_invert
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF   # Standard: NICHT invertiert
+    # kein 'internal:' mehr, kein on_turn_off-Autorestore
+  # --- Heizkurve ---
+  - platform: template
+    name: "Heizkurve aktiv"
+    id: curve_enable_sw
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: |-
+          // Kurve aktivieren
+          id(curve_enable) = true;
+
+          // Im Winter den *bisherigen* manuellen Sollwert sichern
+          if (id(heizmodus) == "winter") {
+            id(curve_manual_winter_sp) = id(zieltemperatur_input).state;
+            ESP_LOGI("CURVE","Saved manual winter SP: %.1f°C", id(curve_manual_winter_sp));
+          }
+
+          // Optional: sofort auf Kurvenwert umschalten (komfortabel fürs UI)
+          if (id(heizmodus) == "winter") {
+            float sp_curve = id(curve_vl_target).state;
+            if (std::isfinite(sp_curve)) {
+              id(zieltemperatur) = sp_curve;
+              id(zieltemperatur_input).publish_state(sp_curve);
+              id(pid_integral) = 0.0f;
+              id(pid_last_error) = 0.0f;
+              ESP_LOGI("CURVE","Applied curve SP immediately: %.1f°C", sp_curve);
+            }
+          }
+    turn_off_action:
+      - lambda: |-
+          // Kurve deaktivieren
+          id(curve_enable) = false;
+
+          // Im Winter wieder auf *gespeicherten* manuellen Sollwert zurück
+          if (id(heizmodus) == "winter") {
+            float sp = id(curve_manual_winter_sp);
+            // Fallback, falls Speicherwert unplausibel
+            if (!std::isfinite(sp) || sp < 20.0f || sp > 60.0f) {
+              sp = id(zieltemperatur_input).state; // nimm, was im UI steht
+            }
+            id(zieltemperatur) = sp;
+            id(zieltemperatur_input).publish_state(sp);
+            id(pid_integral) = 0.0f;
+            id(pid_last_error) = 0.0f;
+            ESP_LOGI("CURVE","Restored manual winter SP: %.1f°C", sp);
+          }
+
+  - platform: template
+    name: "Mischer pausieren bei Brenner"
+    id: mixer_pause_on_burner
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF   # AUS = Regler bleibt aktiv, wenn Brenner läuft
+
+binary_sensor:
+  - platform: gpio
+    name: "a6-input1"
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 0
+      mode: INPUT
+      inverted: true
+
+  - platform: gpio
+    name: "a6-input2"
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 1
+      mode: INPUT
+      inverted: true
+
+  - platform: gpio
+    name: "a6-input3"
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 2
+      mode: INPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Brennerbetrieb BZ"
+    id: brennerbetrieb_bz
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 3
+      mode: INPUT
+      inverted: true
+    device_class: running
+
+  - platform: gpio
+    name: "Brennerstoerung"
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 4
+      mode: INPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Thermostat_Buderus"
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 5
+      mode: INPUT
+      inverted: true
+
+# --- HOME page setpoint nudges ---
+  - platform: nextion
+    id: touch_b_flow_minus
+    internal: true
+    component_name: home.b_flow_minus
+    on_press:
+      - logger.log: "HMI: b_dhw_plus gedrückt"
+#      - number.decrement: zieltemperatur_input
+  - platform: nextion
+    id: touch_b_flow_plus
+    internal: true
+    component_name: home.b_flow_plus
+    on_press:
+      - number.increment: zieltemperatur_input
+  - platform: nextion
+    id: touch_b_dhw_minus
+    internal: true
+    component_name: home.b_dhw_minus
+    on_press:
+      - number.decrement: warmwasser_zieltemperatur_input
+  - platform: nextion
+    id: touch_b_dhw_plus
+    internal: true
+    component_name: home.b_dhw_plus
+    on_press:
+      - number.increment: warmwasser_zieltemperatur_input
+  - platform: nextion
+    id: touch_b_boiler_minus
+    internal: true
+    component_name: home.b_boiler_minus
+    on_press:
+      - number.decrement: kessel_soll_summer_idle_input
+  - platform: nextion
+    id: touch_b_boiler_plus
+    internal: true
+    component_name: home.b_boiler_plus
+    on_press:
+      - number.increment: kessel_soll_summer_idle_input
+
+  - platform: nextion
+    id: touch_mode_winter_by_id
+    page_id: 0
+    component_id: 24        # <— ID aus Log für WINTER
+    on_press:
+      - logger.log: "HMI: Winter gedrückt (per ID)"
+      - script.execute: { id: set_mode_from_hmi, mode: "winter" }
+
+  - platform: nextion
+    id: touch_mode_sommer_by_id
+    page_id: 0
+    component_id: 25        # <— ID aus Log für SOMMER
+    on_press:
+      - logger.log: "HMI: Sommer gedrückt (per ID)"
+      - script.execute: { id: set_mode_from_hmi, mode: "summer" }
+
+  - platform: nextion
+    id: touch_mode_pool_by_id
+    page_id: 0
+    component_id: 26        # <— ID aus Log für POOL (bitte ermitteln)
+    on_press:
+      - logger.log: "HMI: Pool gedrückt (per ID)"
+      - script.execute: { id: set_mode_from_hmi, mode: "pool" }
+
+  - platform: template
+    name: "Schwingung erkannt"
+    id: osc_detected
+    device_class: problem
+
+script:
+  - id: set_mode_from_hmi
+    parameters:
+      mode: string
+    then:
+      - lambda: |-
+           id(last_hmi_mode_ms) = millis();
+           // Select sofort lokal setzen (ohne HA-Roundtrip)
+           id(heizmodus_select).publish_state(mode);
+           // String-Global synchron halten
+           id(heizmodus) = mode;
+           ESP_LOGI("Heizmodus", "HMI-Set: %s", mode.c_str());
+
+  - id: set_mixer_percent
+    parameters:
+      pct: float
+    then:
+      - lambda: |-
+          float out = pct;                       // <-- use the script parameter
+          if (id(mixer_invert).state) out = 100.0f - out;
+          if (!std::isfinite(out)) out = 50.0f;
+          if (out < 0.0f)   out = 0.0f;
+          if (out > 100.0f) out = 100.0f;
+
+          id(gp8403_output_1).set_level(out / 100.0f);
+          id(mischer_position) = out;            // shows the actually commanded (post-inversion) %
+          id(mischer_position_sensor).publish_state(out);
+          ESP_LOGI("Mischer","Analog set to %.1f%% (inv=%d)", out, id(mixer_invert).state);
+
+  - id: close_mixer_analog
+    then:
+      - lambda: |-
+          float closed = id(mixer_invert).state ? 100.0f : 0.0f;
+          id(gp8403_output_1).set_level(closed / 100.0f);
+          id(mischer_position) = closed;
+          id(mischer_position_sensor).publish_state(closed);
+          if (id(mischer_auf).state) id(mischer_auf).turn_off();
+          if (id(mischer_zu).state)  id(mischer_zu).turn_off();
+          ESP_LOGI("Mischer","Analog closed (%.1f%%).", closed);
+  - id: init_mischer_position
+    then:
+      - lambda: |-
+          float out_pct = id(mischer_position);
+          if (!std::isfinite(out_pct) || out_pct < 0.0f || out_pct > 100.0f) {
+            out_pct = 50.0f;
+            ESP_LOGW("Boot","mischer_position invalid after boot -> 50%%");
+          }
+          id(gp8403_output_1).set_level(out_pct / 100.0f);
+          id(mischer_position_sensor).publish_state(out_pct);
+          ESP_LOGI("Boot","Restored mixer to %.1f%% (delayed init)", out_pct);
+  - id: saison_update_logic
+    mode: restart
+    then:
+      - lambda: |-
+          // --- 1) Auto-Winter/Sommer anhand Außentemperatur & Hysterese
+          float t = id(outdoor).state;
+          if (std::isfinite(t)) {
+            const float thr  = id(curve_heat_limit);            // nutzt "Heizgrenze AT"
+            const float hyst = id(saison_auto_hysterese).state; // z. B. 2K
+            const float up   = thr + 0.5f*hyst;  // Wechsel -> Sommer
+            const float down = thr - 0.5f*hyst;  // Wechsel -> Winter
+            if (id(saison_auto_is_winter)) {
+              if (t >= up)  id(saison_auto_is_winter) = false;
+            } else {
+              if (t <= down) id(saison_auto_is_winter) = true;
+            }
+          } else {
+            ESP_LOGW("MODE","AT ungueltig – Auto-Bewertung ausgesetzt");
+          }
+
+          // --- 2) Auswahl anwenden -> effektiven heizmodus setzen
+          const std::string sel = id(heizmodus_select).state;
+          std::string eff = id(heizmodus);
+
+          if (sel == "pool") {
+            eff = "pool";                          // Pool übersteuert alles
+          } else if (sel == "summer") {
+            eff = "summer";
+          } else if (sel == "winter") {
+            eff = "winter";
+          } else { // "auto"
+            eff = id(saison_auto_is_winter) ? "winter" : "summer";
+          }
+
+          if (eff != id(heizmodus)) {
+            id(heizmodus) = eff;
+            ESP_LOGI("MODE","Effektiver Modus -> %s (Select=%s)", eff.c_str(), sel.c_str());
+          }
+
+
+
+button:
+  - platform: template
+    id: update_nextion_button
+    name: "Update Nextion"
+    entity_category: diagnostic
+    on_press:
+      then:
+        - lambda: 'id(nextion_display)->upload_tft();'
+  - platform: template
+    name: "EEPROM Self-Test"
+    id: eeprom_self_test
+    on_press:
+      - lambda: |-
+          using esphome::i2c::ErrorCode;
+
+          auto dev = id(eeprom);
+          const uint16_t base = 0x7FF0;
+          const uint8_t  N    = 16;
+          uint8_t original[N], verify[N];
+
+          auto wr = [&](uint16_t addr, uint8_t val) -> bool {
+            uint8_t buf[3] = { (uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF), val };
+            auto res = dev->write(buf, sizeof(buf));
+            delay(5);  // tWR
+            return res == ErrorCode::ERROR_OK;
+          };
+
+          auto rd = [&](uint16_t addr, uint8_t *out) -> bool {
+            uint8_t ab[2] = { (uint8_t)(addr >> 8), (uint8_t)(addr & 0xFF) };
+            if (dev->write(ab, sizeof(ab)) != ErrorCode::ERROR_OK) return false;
+            return dev->read(out, 1) == ErrorCode::ERROR_OK;
+          };
+
+          ESP_LOGI("eeprom", "Starting self-test at 0x%04X..0x%04X", base, base + N - 1);
+
+          for (uint8_t i = 0; i < N; i++) {
+            if (!rd(base + i, &original[i])) {
+              ESP_LOGE("eeprom", "Read original failed @0x%04X", base + i);
+              return;
+            }
+          }
+
+          for (uint8_t i = 0; i < N; i++) {
+            uint8_t v = 0xA0 + i;
+            if (!wr(base + i, v)) {
+              ESP_LOGE("eeprom", "Write failed @0x%04X", base + i);
+              for (uint8_t j = 0; j <= i; j++) wr(base + j, original[j]);
+              return;
+            }
+          }
+
+          uint8_t mismatches = 0;
+          for (uint8_t i = 0; i < N; i++) {
+            if (!rd(base + i, &verify[i])) { mismatches = 0xFF; break; }
+            uint8_t exp = 0xA0 + i;
+            if (verify[i] != exp) {
+              ESP_LOGE("eeprom", "Mismatch @0x%04X: got 0x%02X, expected 0x%02X", base + i, verify[i], exp);
+              mismatches++;
+            }
+          }
+
+          for (uint8_t i = 0; i < N; i++) wr(base + i, original[i]);
+
+          if (mismatches == 0) {
+            ESP_LOGI("eeprom", "EEPROM self-test PASS (restored).");
+          } else if (mismatches == 0xFF) {
+            ESP_LOGE("eeprom", "EEPROM self-test FAILED due to read error (restored).");
+          } else {
+            ESP_LOGE("eeprom", "EEPROM self-test FAILED with %u mismatches (restored).", mismatches);
+          }
+  - platform: restart
+    name: "Neustart"
+    id: restart_button
+  - platform: template
+    name: "Reset Alle Einstellungen"
+    id: reset_all_settings
+    icon: "mdi:restart"
+    on_press:
+      then:
+        - lambda: |-
+            // core setpoints + PID
+            id(zieltemperatur) = 40.0f;
+            id(pid_integral) = 0.0f;
+            id(pid_last_error) = 0.0f;
+            id(pid_output) = 0.0f;
+            id(pid_kp) = 0.80f;
+            id(pid_ki) = 0.0020f;
+            id(pid_kd) = 0.40f;
+
+            // DHW + mode
+            id(warmwasser_zieltemperatur) = 50.0f;
+            id(heizmodus) = "summer";
+
+            // analog-only housekeeping
+            id(mixer_trim) = 0.0f;
+            id(ctrl_last_ms) = 0;
+            id(prev_kessel_temp) = 0.0f;
+
+            // close mixer via DAC so we’re in a safe state
+            float closed = id(mixer_invert).state ? 100.0f : 0.0f;
+            id(gp8403_output_1).set_level(closed / 100.0f);
+            id(mischer_position) = closed;
+            id(mischer_position_sensor).publish_state(closed);
+
+            ESP_LOGI("Reset", "Analog-only reset done.");
+        - button.press: restart_button
+
+# One-shot button to clear the lock/password (writes 0 to both regs)
+  - platform: template
+    name: "TUF Password Reset"
+    on_press:
+      - number.set: { id: tuf_lock_reg_49, value: 0 }
+      - delay: 200ms
+      - number.set: { id: tuf_lock_reg_50, value: 0 }
+
+sensor:
+  - platform: wifi_signal
+    name: "Heizung ESP32 WLAN Qualität"
+    update_interval: 60s
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          int rssi = static_cast<int>(x);
+          if (rssi <= -100) return 0;
+          else if (rssi >= -50) return 100;
+          else return 2 * (rssi + 100);
+  - platform: template
+    name: "Vorlauftemperatur 30min Mittelwert"
+    id: vorlauf_30min_mittel
+    unit_of_measurement: "C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      return id(vorlauftemperatur).state;
+    filters:
+      - sliding_window_moving_average:
+          window_size: 180
+          send_every: 1
+  - platform: template
+    name: "Zieltemperatur Sensor"
+    id: zieltemperatur_sensor
+    unit_of_measurement: "C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      return id(zieltemperatur);
+  - platform: template
+    name: "Warmwasser Zieltemperatur Sensor"
+    id: warmwasser_zieltemperatur_sensor
+    unit_of_measurement: "C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      return id(warmwasser_zieltemperatur);
+  - platform: template
+    name: "Mischer Position"
+    id: mischer_position_sensor
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      return id(mischer_position);
+
+  - platform: uptime
+    name: "ESPHome Laufzeit Sekunden"
+    id: esphome_uptime_seconds
+  - platform: template
+    name: "Brenner Betriebsstunden"
+    id: brenner_betriebsstunden_sensor
+    unit_of_measurement: "h"
+    accuracy_decimals: 2
+    lambda: |-
+      return id(brenner_betriebsstunden);
+    update_interval: 60s
+  - platform: template
+    name: "Kessel Zieltemperatur (aktiv)"
+    id: kessel_soll_sensor
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    device_class: temperature
+    state_class: measurement
+    update_interval: 10s
+    lambda: |-
+      return id(vessel_soll);
+
+  # ------------------ Vorlauf (0x0000) ------------------
+  # Public "clean" sensor (keeps same ID)
+  - platform: template
+    id:  vorlauftemperatur
+    name: "Vorlauftemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+  
+  # Raw Modbus reader
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: vl_raw
+    internal: true
+    register_type: holding
+    address: 0x0000
+    value_type: U_WORD
+    lambda: |-
+      const uint16_t reg = x;
+      if (reg == 0x7FFF) { ESP_LOGW("modbus","[VL] raw=0x7FFF -> invalid"); return NAN; }
+      return (float)reg * 0.1f;
+  
+    on_value:
+      then:
+        - lambda: |-
+            const float v = id(vl_raw).state;
+            const uint32_t now = millis();
+            const float MIN=-40, MAX=120, MAXJ=5.0f, A=0.25f;
+            const uint32_t STALE=5UL*60UL*1000UL;
+  
+            bool ok = isfinite(v) && v>=MIN && v<=MAX;
+            if (!ok) ESP_LOGW("modbus","[VL] reject bounds/NaN v=%.2f", v);
+            if (ok && isfinite(id(g_vl_last))) {
+              float dv=fabsf(v-id(g_vl_last));
+              if (dv>MAXJ) { ok=false; ESP_LOGW("modbus","[VL] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, MAXJ, id(g_vl_last), v); }
+            }
+  
+            if (ok) {
+              if (isfinite(id(g_vl_ema))) id(g_vl_ema) += A*(v-id(g_vl_ema)); else id(g_vl_ema)=v;
+              float out = roundf(id(g_vl_ema)*10)/10.0f;
+              id(vorlauftemperatur).publish_state(out);
+              id(g_vl_last)=out; id(g_vl_ms)=now; id(g_vl_inv)=0;
+            } else {
+              id(g_vl_inv)++;
+              if (isfinite(id(g_vl_last)) && (id(g_vl_inv)>5 || (now-id(g_vl_ms))>STALE)) {
+                ESP_LOGW("modbus","[VL] stale republish last=%.1f inv=%d age=%lus",
+                         id(g_vl_last), id(g_vl_inv), (unsigned long)((now-id(g_vl_ms))/1000));
+                id(vorlauftemperatur).publish_state(id(g_vl_last));
+              }
+            }
+  
+  # ------------------ Kessel (0x0001) ------------------
+  - platform: template
+    id:  kesseltemperatur
+    name: "Kesseltemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+  
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: k_raw
+    internal: true
+    register_type: holding
+    address: 0x0001
+    value_type: U_WORD
+    lambda: |-
+      const uint16_t reg = x;
+      if (reg == 0x7FFF) { ESP_LOGW("modbus","[K] raw=0x7FFF -> invalid"); return NAN; }
+      return (float)reg * 0.1f;
+  
+    on_value:
+      then:
+        - lambda: |-
+            const float v = id(k_raw).state;
+            const uint32_t now = millis();
+
+            // --- Parameter ---
+            const float MIN = 0.0f, MAX = 110.0f;        // Plausible Grenzen
+            const float A   = 0.25f;                     // EMA-Faktor
+            const uint32_t STALE_MS = 10UL * 60UL * 1000UL;  // 10 min: danach „Reseed“
+            const int STEP_REJECTS = 3;                  // nach 3 Ablehnungen Step-Change akzeptieren
+
+            // 1) Bounds/NaN
+            bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
+            if (!in_bounds) {
+              ESP_LOGW("modbus","[K] reject bounds/NaN v=%.2f", v);
+            }
+
+            // 2) Dynamische Spike-Schwelle:
+            //    Basis 4K + 1K/Minute seit letztem akzeptierten Publish, max +8K oben drauf.
+            //    Wenn Brenner läuft, noch +3K Toleranz.
+            float dyn_MAXJ = 4.0f;
+            if (id(g_k_ms) != 0) {
+              uint32_t age_ms = now - id(g_k_ms);
+              float age_min = age_ms / 60000.0f;
+              dyn_MAXJ += fminf(age_min * 1.0f, 8.0f);
+            }
+            const bool burning = id(brenner).state || id(brennerbetrieb_bz).state;
+            if (burning) dyn_MAXJ += 3.0f;
+
+            // 3) Erste gültige Messung → Seed
+            bool ok = in_bounds;
+            if (ok && !isfinite(id(g_k_last))) {
+              id(g_k_last) = v;
+              id(g_k_ema)  = v;
+            }
+
+            // 4) Spike-Test ggü. letztem akzeptierten Wert
+            if (ok && isfinite(id(g_k_last))) {
+              float dv = fabsf(v - id(g_k_last));
+              if (dv > dyn_MAXJ) {
+                ok = false;
+                ESP_LOGW("modbus","[K] spike Δ=%.2f>%.2f (%.2f->%.2f)%s",
+                         dv, dyn_MAXJ, id(g_k_last), v, burning ? " (burning)" : "");
+              }
+            }
+
+            // 5) Annahme-/Ablehnungslogik mit Step-Change & Stale-Reseed
+            if (ok) {
+              if (isfinite(id(g_k_ema))) id(g_k_ema) += A * (v - id(g_k_ema)); else id(g_k_ema) = v;
+              float out = roundf(id(g_k_ema) * 10) / 10.0f;
+              id(kesseltemperatur).publish_state(out);
+              id(g_k_last) = out;
+              id(g_k_ms)   = now;
+              id(g_k_inv)  = 0;
+            } else {
+              id(g_k_inv)++;
+
+              // (A) Nach > STEP_REJECTS und gültigem Wert als Step-Change akzeptieren
+              if (id(g_k_inv) > STEP_REJECTS && in_bounds) {
+                id(g_k_ema) = v;  // reseed EMA auf neuen Level
+                float out = roundf(v * 10) / 10.0f;
+                id(kesseltemperatur).publish_state(out);
+                id(g_k_last) = out;
+                id(g_k_ms)   = now;
+                id(g_k_inv)  = 0;
+                ESP_LOGW("modbus","[K] accepted step-change after %d rejects: %.1f°C", STEP_REJECTS, out);
+                return;
+              }
+
+              // (B) Wenn letzter akzeptierter Wert zu alt ist → Reseed
+              if (in_bounds && isfinite(id(g_k_last)) && (now - id(g_k_ms) > STALE_MS)) {
+                id(g_k_ema) = v;
+                float out = roundf(v * 10) / 10.0f;
+                id(kesseltemperatur).publish_state(out);
+                id(g_k_last) = out;
+                id(g_k_ms)   = now;
+                id(g_k_inv)  = 0;
+                ESP_LOGW("modbus","[K] stale>10min -> reseeded to %.1f°C", out);
+                return;
+              }
+
+              // (C) Keep-alive: alle 10 Ablehnungen letzten Wert erneut publishen
+              if (isfinite(id(g_k_last)) && (id(g_k_inv) % 10) == 0) {
+                id(kesseltemperatur).publish_state(id(g_k_last));
+              }
+            }
+  # ------------------ Warmwasser (0x0002) ------------------
+  - platform: template
+    id:  warmwassertemperatur
+    name: "Warmwassertemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+  
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: ww_raw
+    internal: true
+    register_type: holding
+    address: 0x0002
+    value_type: U_WORD
+    lambda: |-
+      const uint16_t reg = x;
+      if (reg == 0x7FFF) { ESP_LOGW("modbus","[WW] raw=0x7FFF -> invalid"); return NAN; }
+      return (float)reg * 0.1f;
+  
+    on_value:
+      then:
+        - lambda: |-
+            const float v=id(ww_raw).state; const uint32_t now=millis();
+            const float MIN=0, MAX=75, MAXJ=3.0f, A=0.20f;
+            const uint32_t STALE=10UL*60UL*1000UL;
+            bool ok=isfinite(v)&&v>=MIN&&v<=MAX;
+            if(!ok) ESP_LOGW("modbus","[WW] reject bounds/NaN v=%.2f", v);
+            if(ok && isfinite(id(g_ww_last))){
+              float dv=fabsf(v-id(g_ww_last));
+              if(dv>MAXJ){ok=false; ESP_LOGW("modbus","[WW] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, MAXJ, id(g_ww_last), v);}
+            }
+            if(ok){
+              if(isfinite(id(g_ww_ema))) id(g_ww_ema)+=A*(v-id(g_ww_ema)); else id(g_ww_ema)=v;
+              float out=roundf(id(g_ww_ema)*10)/10.0f;
+              id(warmwassertemperatur).publish_state(out);
+              id(g_ww_last)=out; id(g_ww_ms)=now; id(g_ww_inv)=0;
+            } else {
+              id(g_ww_inv)++;
+              if(isfinite(id(g_ww_last)) && (id(g_ww_inv)>5 || (now-id(g_ww_ms))>STALE)){
+                ESP_LOGW("modbus","[WW] stale republish last=%.1f", id(g_ww_last));
+                id(warmwassertemperatur).publish_state(id(g_ww_last));
+              }
+            }
+  
+  # ------------------ Außen (0x0003) ------------------
+  - platform: template
+    id:  outdoor
+    name: "Außentemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+  
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: out_raw
+    internal: true
+    register_type: holding
+    address: 0x0006
+    value_type: U_WORD
+    lambda: |-
+      const uint16_t reg = x;
+      if (reg == 0x7FFF) { ESP_LOGW("modbus","[OUT] raw=0x7FFF -> invalid"); return NAN; }
+      return (float)reg * 0.1f;
+  
+    on_value:
+      then:
+        - lambda: |-
+            const float v = id(out_raw).state;
+            const uint32_t now = millis();
+
+            // --- guards & params ---
+            const float MIN=-50, MAX=60;
+            const float MAXJ=3.0f;         // spike limit between *accepted* points
+            const float A  = 0.30f;        // a bit faster smoothing
+            const uint32_t STALE=15UL*60UL*1000UL;
+
+            // Valid raw?
+            bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
+            if (!in_bounds) {
+              ESP_LOGW("modbus","[OUT] reject bounds/NaN v=%.2f", v);
+            }
+
+            // Step 1: compute spike vs last accepted
+            bool ok = in_bounds;
+            if (ok && isfinite(id(g_out_last))) {
+              float dv = fabsf(v - id(g_out_last));
+              if (dv > MAXJ) {
+                ok = false;  // looks like a spike for now
+                ESP_LOGW("modbus","[OUT] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, MAXJ, id(g_out_last), v);
+              }
+            }
+
+            // Step 2: accept policy
+            if (ok) {
+              // Normal path: EMA + publish
+              if (isfinite(id(g_out_ema))) id(g_out_ema) += A * (v - id(g_out_ema)); else id(g_out_ema) = v;
+              float out = roundf(id(g_out_ema)*10)/10.0f;
+              id(outdoor).publish_state(out);
+              id(g_out_last)=out; id(g_out_ms)=now; id(g_out_inv)=0;
+            } else {
+              // Rejection path
+              id(g_out_inv)++;
+
+              // (A) too many consecutive rejects -> treat as *step change* and accept
+              if (id(g_out_inv) > 5 && in_bounds) {
+                id(g_out_ema) = v;  // reseed EMA
+                float out = roundf(v*10)/10.0f;
+                id(outdoor).publish_state(out);
+                id(g_out_last)=out; id(g_out_ms)=now; id(g_out_inv)=0;
+                ESP_LOGW("modbus","[OUT] accepted step-change after %d rejects: %.1f°C",
+                         id(g_out_inv), out);
+                return;
+              }
+
+              // (B) stale accepted value -> force reseed with current in-bounds raw
+              if (in_bounds && isfinite(id(g_out_last)) && (now - id(g_out_ms) > STALE)) {
+                id(g_out_ema) = v;
+                float out = roundf(v*10)/10.0f;
+                id(outdoor).publish_state(out);
+                id(g_out_last)=out; id(g_out_ms)=now; id(g_out_inv)=0;
+                ESP_LOGW("modbus","[OUT] stale>15min -> reseeded to %.1f°C", out);
+                return;
+              }
+
+              // (C) otherwise: keep last value alive occasionally (your previous behavior)
+              if (isfinite(id(g_out_last)) && (id(g_out_inv)>5 || (now-id(g_out_ms))>STALE)) {
+                ESP_LOGW("modbus","[OUT] stale republish last=%.1f inv=%d age=%lus",
+                         id(g_out_last), id(g_out_inv), (unsigned long)((now-id(g_out_ms))/1000));
+                id(outdoor).publish_state(id(g_out_last));
+              }
+            }
+        - script.execute: saison_update_logic
+  
+  # ------------------ Temp5 (0x0004) ------------------
+  - platform: template
+    id:  temp5
+    name: "Temp5"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+  
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: t5_raw
+
+    internal: true
+    register_type: holding
+    address: 0x0004
+    value_type: U_WORD
+    filters:
+      # 1) Median glättet einzelne Ausreißer in der Nachbarschaft
+      - median:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
+
+      # 2) Spike-Guard: große Sprünge werden rate-limited statt übernommen
+      - lambda: |-
+          static float last = NAN;
+          static uint32_t last_ms = 0;
+          const float MAX_JUMP = 3.0f;   // >3 K pro Sample = Spike
+          const float MAX_RATE = 0.8f;   // max. 0.8 K/s nach Spike
+          const uint32_t now = millis();
+          const float dt = last_ms ? (now - last_ms) / 1000.0f : 5.0f;
+
+          if (!std::isfinite(x)) return last;     // halte letzten guten Wert
+          if (!std::isfinite(last)) {             // Initialisierung
+            last = x; last_ms = now; return x;
+          }
+
+          float dx = x - last;
+          if (fabsf(dx) > MAX_JUMP) {             // Spike erkannt
+            float max_step = MAX_RATE * dt;       // begrenze Sprunghöhe
+            if (fabsf(dx) > max_step)
+              x = last + (dx > 0 ? max_step : -max_step);
+          }
+
+          last = x;
+          last_ms = now;
+          return x;
+
+      # 3) EMA fürs sanfte Nachziehen (keine Farbe, wenig Verzögerung)
+      - exponential_moving_average:
+          alpha: 0.2
+          send_every: 1
+  
+  # ------------------ Temp6 (0x0005) ------------------
+  - platform: template
+    id:  temp6
+    name: "Temp6"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+  
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: t6_raw
+    internal: true
+    register_type: holding
+    address: 0x0005
+    value_type: U_WORD
+    lambda: |-
+      const uint16_t reg = x;
+      if (reg == 0x7FFF) { ESP_LOGW("modbus","[T6] raw=0x7FFF -> invalid"); return NAN; }
+      return (float)reg * 0.1f;
+    on_value:
+      then:
+        - lambda: |-
+            const float v = id(t6_raw).state;
+            const uint32_t now = millis();
+
+            // Parameter für T6
+            const float MIN = -40.0f, MAX = 120.0f;   // Bounds
+            const float A   = 0.20f;                  // EMA-Faktor
+            const uint32_t STALE_MS = 10UL * 60UL * 1000UL;  // 10 min
+
+            // 1) Bounds-/NaN-Check
+            bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
+            if (!in_bounds) {
+              ESP_LOGW("modbus","[T6] reject bounds/NaN v=%.2f", v);
+            }
+
+            // 2) Dynamische Spike-Schwelle (Basis 3K + 1K/Minute seit letztem validen Publish, max +10K)
+            float dyn_MAXJ = 3.0f;
+            if (id(g_t6_ms) != 0) {
+              uint32_t age_ms = now - id(g_t6_ms);
+              float age_min = age_ms / 60000.0f;
+              dyn_MAXJ += fminf(age_min * 1.0f, 10.0f);
+            }
+
+            // 3) Erste gültige Messung immer akzeptieren (Seed)
+            bool ok = in_bounds;
+            if (ok && !isfinite(id(g_t6_last))) {
+              id(g_t6_last) = v;   // Seed last
+              id(g_t6_ema)  = v;   // Seed EMA
+            }
+
+            // 4) Spike-Test ggü. letztem akzeptierten Wert (nur wenn Seed existiert)
+            if (ok && isfinite(id(g_t6_last))) {
+              float dv = fabsf(v - id(g_t6_last));
+              if (dv > dyn_MAXJ) {
+                ok = false;
+                ESP_LOGW("modbus","[T6] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, dyn_MAXJ, id(g_t6_last), v);
+              }
+            }
+
+            // 5) Annahme-/Ablehnungslogik inkl. Step-Change & Stale
+            if (ok) {
+              if (isfinite(id(g_t6_ema))) id(g_t6_ema) += A * (v - id(g_t6_ema)); else id(g_t6_ema) = v;
+              float out = roundf(id(g_t6_ema) * 10) / 10.0f;
+              id(temp6).publish_state(out);
+              id(g_t6_last) = out;
+              id(g_t6_ms)   = now;
+              id(g_t6_inv)  = 0;
+            } else {
+              id(g_t6_inv)++;
+
+              if (id(g_t6_inv) > 3 && in_bounds) {
+                id(g_t6_ema) = v;  // reseed auf neuen Level
+                float out = roundf(v * 10) / 10.0f;
+                id(temp6).publish_state(out);
+                id(g_t6_last) = out;
+                id(g_t6_ms)   = now;
+                id(g_t6_inv)  = 0;
+                ESP_LOGW("modbus","[T6] accepted step-change after %d rejects: %.1f°C", 3, out);
+                return;
+              }
+
+              if (in_bounds && isfinite(id(g_t6_last)) && (now - id(g_t6_ms) > STALE_MS)) {
+                id(g_t6_ema) = v;
+                float out = roundf(v * 10) / 10.0f;
+                id(temp6).publish_state(out);
+                id(g_t6_last) = out;
+                id(g_t6_ms)   = now;
+                id(g_t6_inv)  = 0;
+                ESP_LOGW("modbus","[T6] stale>10min -> reseeded to %.1f°C", out);
+                return;
+              }
+
+              if (isfinite(id(g_t6_last)) && (id(g_t6_inv) % 10) == 0) {
+                id(temp6).publish_state(id(g_t6_last));
+              }
+            }
+  # ------------------ Temp7 (0x0006) ------------------
+  - platform: template
+    id:  temp7
+    name: "Temp7"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 2s
+  
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: t7_raw
+    internal: true
+    register_type: holding
+    address: 0x0003
+    value_type: U_WORD
+    lambda: |-
+      const uint16_t reg = x;
+      if (reg == 0x7FFF) { ESP_LOGW("modbus","[T7] raw=0x7FFF -> invalid"); return NAN; }
+      return (float)reg * 0.1f;
+    on_value:
+      then:
+        - lambda: |-
+            const float v = id(t7_raw).state;
+            const uint32_t now = millis();
+
+            // Parameter für T7
+            const float MIN = -40.0f, MAX = 120.0f;  // Bounds
+            const float A   = 0.20f;                 // EMA-Faktor
+            const uint32_t STALE_MS = 10UL * 60UL * 1000UL;  // 10 min
+
+            // 1) Bounds-/NaN-Check
+            bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
+            if (!in_bounds) {
+              ESP_LOGW("modbus","[T7] reject bounds/NaN v=%.2f", v);
+            }
+
+            // 2) Dynamische Spike-Schwelle
+            float dyn_MAXJ = 3.0f;
+            if (id(g_t7_ms) != 0) {
+              uint32_t age_ms = now - id(g_t7_ms);
+              float age_min = age_ms / 60000.0f;
+              dyn_MAXJ += fminf(age_min * 1.0f, 10.0f);
+            }
+
+            // 3) Erste gültige Messung immer akzeptieren (Seed)
+            bool ok = in_bounds;
+            if (ok && !isfinite(id(g_t7_last))) {
+              id(g_t7_last) = v;
+              id(g_t7_ema)  = v;
+            }
+
+            // 4) Spike-Test
+            if (ok && isfinite(id(g_t7_last))) {
+              float dv = fabsf(v - id(g_t7_last));
+              if (dv > dyn_MAXJ) {
+                ok = false;
+                ESP_LOGW("modbus","[T7] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, dyn_MAXJ, id(g_t7_last), v);
+              }
+            }
+
+            // 5) Annahme-/Ablehnungslogik
+            if (ok) {
+              if (isfinite(id(g_t7_ema))) id(g_t7_ema) += A * (v - id(g_t7_ema)); else id(g_t7_ema) = v;
+              float out = roundf(id(g_t7_ema) * 10) / 10.0f;
+              id(temp7).publish_state(out);
+              id(g_t7_last) = out;
+              id(g_t7_ms)   = now;
+              id(g_t7_inv)  = 0;
+            } else {
+              id(g_t7_inv)++;
+
+              if (id(g_t7_inv) > 3 && in_bounds) {
+                id(g_t7_ema) = v;
+                float out = roundf(v * 10) / 10.0f;
+                id(temp7).publish_state(out);
+                id(g_t7_last) = out;
+                id(g_t7_ms)   = now;
+                id(g_t7_inv)  = 0;
+                ESP_LOGW("modbus","[T7] accepted step-change after %d rejects: %.1f°C", 3, out);
+                return;
+              }
+
+              if (in_bounds && isfinite(id(g_t7_last)) && (now - id(g_t7_ms) > STALE_MS)) {
+                id(g_t7_ema) = v;
+                float out = roundf(v * 10) / 10.0f;
+                id(temp7).publish_state(out);
+                id(g_t7_last) = out;
+                id(g_t7_ms)   = now;
+                id(g_t7_inv)  = 0;
+                ESP_LOGW("modbus","[T7] stale>10min -> reseeded to %.1f°C", out);
+                return;
+              }
+
+              if (isfinite(id(g_t7_last)) && (id(g_t7_inv) % 10) == 0) {
+                id(temp7).publish_state(id(g_t7_last));
+              }
+            }
+  
+  # ------------------ Temp8 (0x0007) ------------------
+  - platform: template
+    id:  temp8
+    name: "Temp8"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+  
+  - platform: modbus_controller
+    modbus_controller_id: mb_ctrl
+    id: t8_raw
+    internal: true
+    register_type: holding
+    address: 0x0007
+    value_type: U_WORD
+    lambda: |-
+      const uint16_t reg = x;
+      if (reg == 0x7FFF) { ESP_LOGW("modbus","[T8] raw=0x7FFF -> invalid"); return NAN; }
+      return (float)reg * 0.1f;
+    on_value:
+      then:
+        - lambda: |-
+            const float v=id(t8_raw).state; const uint32_t now=millis();
+            const float MIN=-40, MAX=120, MAXJ=300.0f, A=0.20f;
+            const uint32_t STALE=10UL*60UL*1000UL;
+            bool ok=isfinite(v)&&v>=MIN&&v<=MAX;
+            if(!ok) ESP_LOGW("modbus","[T8] reject v=%.2f", v);
+            if(ok && isfinite(id(g_t8_last))){
+              float dv=fabsf(v-id(g_t8_last));
+              if(dv>MAXJ){ok=false; ESP_LOGW("modbus","[T8] spike Δ=%.2f>%.2f", dv, MAXJ);}
+            }
+            if(ok){
+              if(isfinite(id(g_t8_ema))) id(g_t8_ema)+=A*(v-id(g_t8_ema)); else id(g_t8_ema)=v;
+              float out=roundf(id(g_t8_ema)*10)/10.0f;
+              id(temp8).publish_state(out);
+              id(g_t8_last)=out; id(g_t8_ms)=now; id(g_t8_inv)=0;
+            } else {
+              id(g_t8_inv)++;
+              if(isfinite(id(g_t8_last)) && (id(g_t8_inv)>5 || (now-id(g_t8_ms))>STALE))
+                id(temp8).publish_state(id(g_t8_last));
+            }
+
+
+
+
+  # TUF2000M Flow Rate Sensor (Modbus RTU via separate RS485 UART)
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000m   # <- dein ID-Name
+    name: "TUF Flow Rate"
+    id: tuf_flow_rate
+    register_type: holding
+    address: 0x0001
+    value_type: FP32
+    unit_of_measurement: "m³/h"
+    device_class: volume_flow_rate
+    state_class: measurement
+    accuracy_decimals: 3
+
+  - platform: integration
+    name: "TUF Volume Total"
+    id: tuf_volume_total
+    sensor: tuf_flow_rate     # m³/h -> m³
+    time_unit: h
+    unit_of_measurement: "m³"
+    accuracy_decimals: 3
+    restore: true
+    device_class: water
+    state_class: total_increasing   # <-- REQUIRED for long-term stats
+  
+  - platform: template
+    id: curve_vl_target
+    name: Vorlauf Soll (Heizkurve)
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      // Quelle: geglättete Außentemperatur (Fallback: raw)
+      float t_src = id(outdoor_30min_avg).state;
+      if (!std::isfinite(t_src)) t_src = id(outdoor).state;
+      if (!std::isfinite(t_src)) return NAN;
+
+      // 0..1 zwischen Heizgrenze (warm) und Auslegung (kalt)
+      float t_hi = id(curve_heat_limit);
+      float t_lo = id(curve_t_design);
+      if (t_hi <= t_lo + 0.1f) t_hi = t_lo + 0.1f;   // Schutz
+      float f = (t_hi - t_src) / (t_hi - t_lo);
+      if (f < 0) f = 0; if (f > 1) f = 1;
+
+      // Basislinie
+      float t_base = id(curve_t_min) + f * (id(curve_t_max) - id(curve_t_min));
+
+      // Niveau (+/- K) und Neigung (1.0 = neutral)
+      float t = t_base + id(curve_level)
+                + (id(curve_slope) - 1.0f) * (t_base - id(curve_t_min));
+
+      // Grenzen
+      if (t < id(curve_t_min)) t = id(curve_t_min);
+      if (t > id(curve_t_max)) t = id(curve_t_max);
+      return t;
+      
+  - platform: template
+    name: "Kessel Hysterese (aktiv)"
+    id: kessel_hysterese_active
+    unit_of_measurement: "K"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      float h = id(kessel_hysterese_winter);
+      return (std::isfinite(h) && h >= 0.1f) ? h : 2.0f;
+
+  - platform: template
+    name: "Brenner Ein-Schwelle"
+    id: boiler_on_threshold_sensor
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      float kessel_soll = id(vessel_soll);
+      float h = std::isfinite(id(kessel_hysterese_winter)) ? id(kessel_hysterese_winter) : 2.0f;
+      float min_head_needed;
+      if (id(heizmodus) == std::string("winter") && id(curve_enable)) {
+        float vl_sp = std::isfinite(id(curve_vl_target).state) ? id(curve_vl_target).state : id(zieltemperatur);
+        float head  = std::isfinite(id(boiler_headroom)) ? id(boiler_headroom) : 7.0f;
+        min_head_needed = vl_sp + head;
+      } else {
+        min_head_needed = id(zieltemperatur) + 2.0f;
+      }
+      float on_th = fmaxf(kessel_soll - h, min_head_needed);
+      return on_th;
+
+  - platform: template
+    name: "Brenner Aus-Schwelle"
+    id: boiler_off_threshold_sensor
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      float kessel_soll = id(vessel_soll);
+      float H = std::isfinite(id(kessel_hysterese_winter)) ? id(kessel_hysterese_winter) : 2.0f;
+  
+      float min_head_needed;
+      if (id(heizmodus) == std::string("winter") && id(curve_enable)) {
+        float vl_sp = std::isfinite(id(curve_vl_target).state) ? id(curve_vl_target).state : id(zieltemperatur);
+        float head  = std::isfinite(id(boiler_headroom)) ? id(boiler_headroom) : 7.0f;
+        min_head_needed = vl_sp + head;
+      } else {
+        min_head_needed = id(zieltemperatur) + 2.0f;
+      }
+      float on_th  = fmaxf(kessel_soll - H, min_head_needed);
+      float off_th = on_th + H;
+  
+      if (id(heizmodus) == std::string("winter") && id(curve_enable)) {
+        float head = std::isfinite(id(boiler_headroom)) ? id(boiler_headroom) : 7.0f;
+        float kessel_abs_max = id(curve_t_max) + head;
+        if (off_th > kessel_abs_max) off_th = kessel_abs_max;
+      }
+      return off_th;
+
+  - platform: template
+    id: bz_starts_24h_sensor
+    name: "BZ Starts 24h"
+    unit_of_measurement: "count"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    id: bz_burn_hours_24h_sensor
+    name: "BZ Laufzeit 24h"
+    unit_of_measurement: "h"
+    accuracy_decimals: 2
+    update_interval: never
+
+  - platform: template
+    id: bz_starts_per_burn_hour_24h_sensor
+    name: "Starts pro Brennerstunde (BZ, 24h)"
+    unit_of_measurement: "/h"
+    icon: mdi:chart-line-variant
+    accuracy_decimals: 2
+    update_interval: never
+  - platform: template
+    name: "Außentemperatur 30min Mittelwert"
+    id: outdoor_30min_avg
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    update_interval: 10s
+    lambda: |-
+      return id(outdoor).state;
+    filters:
+      - sliding_window_moving_average:
+          window_size: 540     # 180 * 10s = 30 Minuten
+          send_every: 1
+
+  - platform: template
+    name: "Regelabweichung RMS (30min)"
+    id: rms_err_30m
+    unit_of_measurement: "K"
+    accuracy_decimals: 2
+  - platform: template
+    name: "Mischeraktivität /h"
+    id: mixer_activity_per_h
+    unit_of_measurement: "%/h"
+    accuracy_decimals: 0
+  - platform: template
+    name: "Schwingungsperiode (EMA)"
+    id: osc_period_s
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+
+text_sensor:
+  - platform: template
+    name: "ESPHome Laufzeit formatiert"
+    lambda: |-
+      uint32_t seconds = (uint32_t) id(esphome_uptime_seconds).state;
+      uint32_t days = seconds / 86400;
+      uint32_t hours = (seconds % 86400) / 3600;
+      uint32_t minutes = (seconds % 3600) / 60;
+      uint32_t secs = seconds % 60;
+      char buf[32];
+      snprintf(buf, sizeof(buf), "%ud %02uh %02um %02us", days, hours, minutes, secs);
+      return std::string(buf);
+    update_interval: 60s
+    icon: mdi:clock-outline
+  - platform: template
+    name: "Heizmodus (UI)"
+    id: heizmodus_ui
+    update_interval: 2s
+    lambda: |-
+      std::string sel = id(heizmodus_select).state;
+      bool is_w = id(saison_auto_is_winter);
+      if (sel == "pool")   return std::string("Pool");
+      if (sel == "winter") return std::string("Winter");
+      if (sel == "summer") return std::string("Sommer");
+      return is_w ? std::string("Auto (Winter)") : std::string("Auto (Sommer)");
+
+number:
+  - platform: template
+    name: "Zieltemperatur"
+    id: zieltemperatur_input
+    optimistic: true
+    restore_value: true
+    min_value: 20.0
+    max_value: 60.0
+    step: 0.5
+    initial_value: 40.0
+    set_action:
+      then:
+        - lambda: |-
+            id(zieltemperatur) = x;
+            if (id(heizmodus) == "winter" && !id(curve_enable)) {
+              id(curve_manual_winter_sp) = x; // immer aktuell halten
+            }
+            id(pid_integral)=0.0f;
+            id(pid_last_error)=0.0f;
+            ESP_LOGI("PID", "Zieltemperatur über UI gesetzt: %.2f", x);
+  - platform: template
+    name: "Warmwasser Zieltemperatur"
+    id: warmwasser_zieltemperatur_input
+    optimistic: true
+    restore_value: true
+    min_value: 30.0
+    max_value: 60.0
+    step: 1.0
+    initial_value: 50.0
+    set_action:
+      then:
+        - lambda: |-
+            id(warmwasser_zieltemperatur) = x;
+            ESP_LOGI("Warmwasser", "Warmwasser-Zieltemperatur über UI gesetzt: %.2f", x);
+  - platform: template
+    name: "Kessel Soll (Sommer, Idle)"
+    id: kessel_soll_summer_idle_input
+    optimistic: true
+    min_value: 30.0
+    max_value: 80.0
+    step: 1.0
+    initial_value: 40.0
+    unit_of_measurement: "°C"
+    set_action:
+      - lambda: |-
+          id(kessel_soll_summer_idle) = x;
+          ESP_LOGI("Brenner", "Sommer Idle Kessel-Soll gesetzt: %.1f°C", x);
+  - platform: template
+    name: "Kessel Soll (Sommer, DHW aktiv)"
+    id: kessel_soll_summer_ww_input
+    optimistic: true
+    min_value: 45.0
+    max_value: 80.0
+    step: 1.0
+    initial_value: 65.0
+    unit_of_measurement: "°C"
+    set_action:
+      - lambda: |-
+          id(kessel_soll_summer_ww) = x;
+          ESP_LOGI("Brenner", "Sommer DHW Kessel-Soll gesetzt: %.1f°C", x);
+  - platform: template
+    name: "Kessel Soll (Winter)"
+    id: kessel_soll_winter_input
+    optimistic: true
+    min_value: 45.0
+    max_value: 85.0
+    step: 1.0
+    initial_value: 65.0
+    unit_of_measurement: "°C"
+    set_action:
+      - lambda: |-
+          id(kessel_soll_winter) = x;
+          ESP_LOGI("Brenner", "Winter Kessel-Soll gesetzt: %.1f°C", x);
+  - platform: template
+    name: "Kessel Soll (Pool)"
+    id: kessel_soll_pool_input
+    optimistic: true
+    min_value: 50.0
+    max_value: 90.0
+    step: 1.0
+    initial_value: 80.0
+    unit_of_measurement: "°C"
+    set_action:
+      - lambda: |-
+          id(kessel_soll_pool) = x;
+          ESP_LOGI("Brenner", "Pool Kessel-Soll gesetzt: %.1f°C", x);
+  # Two holding registers that store the lock/password
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000m      # <-- your TUF modbus_controller id
+    id: tuf_lock_reg_49
+    name: "TUF Lock Reg49"
+    address: 49
+    register_type: holding
+    value_type: U_WORD
+    min_value: 0
+    max_value: 9999
+    step: 1
+    mode: box
+
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000m
+    id: tuf_lock_reg_50
+    name: "TUF Lock Reg50"
+    address: 50
+    register_type: holding
+    value_type: U_WORD
+    min_value: 0
+    max_value: 9999
+    step: 1
+    mode: box
+
+  - platform: template
+    name: "Mischer Zielposition (%)"
+    id: mixer_target_percent
+    min_value: 0
+    max_value: 100
+    step: 1
+    unit_of_measurement: "%"
+    set_action:
+      - script.execute:
+          id: set_mixer_percent
+          pct: !lambda 'return x;'
+
+  # --- Heizkurve ---
+  - platform: template
+    name: "Heizkurve Neigung"
+    id: curve_slope_num
+    min_value: 0.3
+    max_value: 3.0
+    step: 0.05
+    optimistic: true
+    restore_value: true
+    initial_value: 1.30
+    set_action: { lambda: 'id(curve_slope) = x;' }
+
+  - platform: template
+    name: "Heizkurve Niveau"
+    id: curve_level_num
+    min_value: -20
+    max_value: 30
+    step: 0.5
+    optimistic: true
+    restore_value: true
+    initial_value: 5.0
+    set_action: { lambda: 'id(curve_level) = x;' }
+
+  - platform: template
+    name: "Vorlauf min (Kurve)"
+    id: curve_tmin_num
+    min_value: 20
+    max_value: 45
+    step: 1
+    initial_value: 25
+    set_action: { lambda: 'id(curve_t_min) = x;' }
+
+  - platform: template
+    name: "Vorlauf max (Kurve)"
+    id: curve_tmax_num
+    min_value: 35
+    max_value: 75
+    step: 1
+    initial_value: 65
+    set_action: { lambda: 'id(curve_t_max) = x;' }
+
+  - platform: template
+    name: "Heizgrenze AT"
+    id: curve_heatlimit_num
+    min_value: -10
+    max_value: 28
+    step: 0.5
+    initial_value: 18
+    set_action:
+      - lambda: |-
+          id(curve_heat_limit) = x;
+      - script.execute: saison_update_logic
+  - platform: template
+    name: "Kessel Hysterese"
+    id: kessel_hysterese_num
+    unit_of_measurement: "K"
+    min_value: 0.5
+    max_value: 25.0
+    step: 0.5
+    optimistic: true
+    restore_value: true
+    initial_value: 2.0
+    set_action:
+      - lambda: |-
+          float v = x;
+          if (!std::isfinite(v) || v < 0.1f) v = 2.0f;   // Fallback
+          id(kessel_hysterese) = v;           // keep both in sync
+          id(kessel_hysterese_winter) = v;    // <-- control loop reads this
+          ESP_LOGI("Brenner", "Kessel-Hysterese gesetzt: %.1f K", v);
+  - platform: template
+    name: "Saison Hysterese (K)"
+    id: saison_auto_hysterese
+    unit_of_measurement: "K"
+    min_value: 0.5
+    max_value: 10.0
+    step: 0.5
+    optimistic: true
+    restore_value: true
+    initial_value: 2.0
+
+
+
+time:
+  - platform: sntp
+    id: sntp_time
+    on_time:
+      - seconds: 0
+        minutes: 0
+        hours: 2
+        days_of_week: 7  # 7=Sonntag
+        then:
+          - if:
+              condition:
+                switch.is_on: legionellen_enable
+              then:
+                - lambda: |-
+                    id(warmwasser_zieltemperatur_backup) = id(warmwasser_zieltemperatur); // Backup aktuelle Temperatur
+                    id(warmwasser_zieltemperatur) = 70.0f;
+                    id(warmwasser_zieltemperatur_input).publish_state(70.0f);
+                    ESP_LOGI("Legionellen", "Legionellen-Schaltung gestartet: Warmwasser-Zieltemperatur auf 70°C gesetzt (Backup: %.1f°C)", id(warmwasser_zieltemperatur_backup));
+                - delay: 3h
+                - lambda: |-
+                    id(warmwasser_zieltemperatur) = id(warmwasser_zieltemperatur_backup); // Wiederherstellen
+                    id(warmwasser_zieltemperatur_input).publish_state(id(warmwasser_zieltemperatur_backup));
+                    ESP_LOGI("Legionellen", "Legionellen-Schaltung beendet: Warmwasser-Zieltemperatur zurück auf %.1f°C", id(warmwasser_zieltemperatur_backup));
+
+
+interval:
+  - interval: 10s   # ruhigerer Regeltakt
+    then:
+      - lambda: |-
+          if (id(heizmodus) != std::string("winter")) return;
+  
+          // --- timing ---
+          const uint32_t now = millis();
+          float dt = (id(ctrl_last_ms) == 0) ? 10.0f : (now - id(ctrl_last_ms)) / 1000.0f;
+          if (dt < 0.5f) dt = 0.5f;
+          if (dt > 20.0f) dt = 20.0f;
+          id(ctrl_last_ms) = now;
+  
+          // --- sanitize ---
+          if (!std::isfinite(id(mixer_trim)))   id(mixer_trim)   = 0.0f;
+          if (!std::isfinite(id(pid_integral))) id(pid_integral) = 0.0f;
+          if (!std::isfinite(id(pid_prev_ist))) id(pid_prev_ist) = 0.0f;
+  
+          // --- optional burner hold ---
+          static bool mixer_hold = false;
+          const bool burning = id(brenner).state || id(brennerbetrieb_bz).state;
+          if (id(mixer_pause_on_burner).state) {
+            if (burning) {
+              if (!mixer_hold) {
+                float out = id(mixer_invert).state ? 50.0f : 50.0f;
+                id(gp8403_output_1).set_level(out / 100.0f);
+                id(mischer_position) = out;
+                id(mischer_position_sensor).publish_state(out);
+                if (id(mischer_auf).state) id(mischer_auf).turn_off();
+                if (id(mischer_zu).state)  id(mischer_zu).turn_off();
+                mixer_hold = true;
+                ESP_LOGI("MIXER","Burner ON → hold 50%%, controller paused");
+              }
+              return;
+            } else if (mixer_hold) {
+              mixer_hold = false;
+              ESP_LOGI("MIXER","Burner OFF → controller resumes");
+            }
+          } else if (mixer_hold) {
+            mixer_hold = false;
+          }
+  
+          // --- Heizkurven-Setpoint (Winter + aktiviert) ---
+          float setpoint_manual = id(zieltemperatur);
+          float setpoint_curve_eff = std::isfinite(id(curve_vl_target).state) ? id(curve_vl_target).state : setpoint_manual;
+          if (id(heizmodus) == std::string("winter") && id(curve_enable)) {
+            id(zieltemperatur) = setpoint_curve_eff;
+            if (abs(id(zieltemperatur_input).state - setpoint_curve_eff) > 0.05f)
+              id(zieltemperatur_input).publish_state(setpoint_curve_eff);
+          }
+  
+          // --- process values ---
+          const float soll   = id(zieltemperatur);
+          const float ist    = id(vorlauftemperatur).state;
+          const float kessel = id(kesseltemperatur).state;
+          float error = soll - ist;
+  
+          // derivative on measurement
+          float d_meas = (ist - id(pid_prev_ist)) / dt;
+          id(pid_prev_ist) = ist;
+  
+          // --- feed-forward (sanft) ---
+          const float ff_gain = 0.32f;
+          float deltaKI = kessel - ist;
+          float ff = (deltaKI > 1.0f) ? ff_gain * (deltaKI - 1.0f) : 0.0f;
+          if (ist > soll + 0.5f) ff *= 1.35f;
+          else if (ist < soll - 0.5f) ff *= 0.75f;
+          if (ff > 20.0f) ff = 20.0f;
+  
+          // --- PID mit Anti-Windup ---
+          const float k_gain = 1.6f;  // ruhiger als 2.2
+          float p_term = id(pid_kp) * error;
+          float i_term = id(pid_ki) * id(pid_integral);
+          float d_term = - id(pid_kd) * d_meas;
+  
+          float tentative_base = 50.0f + (p_term + i_term + d_term) * k_gain - ff;
+          float tentative_pre_demand = tentative_base + id(mixer_trim);
+          bool sat_low  = (tentative_pre_demand <= 0.5f);
+          bool sat_high = (tentative_pre_demand >= 99.5f);
+          bool pid_allows_integration = (!sat_low && !sat_high) ||
+                                        (sat_low  && error > 0.0f) ||
+                                        (sat_high && error < 0.0f);
+  
+          if (fabsf(error) > id(pid_deadband_c) && pid_allows_integration) {
+            id(pid_integral) += error * dt;
+            if (id(pid_integral) >  id(pid_integral_limit)) id(pid_integral) =  id(pid_integral_limit);
+            if (id(pid_integral) < -id(pid_integral_limit)) id(pid_integral) = -id(pid_integral_limit);
+          }
+  
+          i_term = id(pid_ki) * id(pid_integral);
+          float pid = p_term + i_term + d_term;
+          if (!std::isfinite(pid)) pid = 0.0f;
+          id(pid_output) = pid;
+  
+          float base = 50.0f + pid * k_gain - ff;
+  
+          // --- Anticipator (später & kleiner) ---
+          static float prev_flow = NAN;
+          static float prev_kessel = NAN;
+          float d_flow   = std::isfinite(prev_flow)   ? (ist    - prev_flow)   / dt : 0.0f;
+          float dkessel  = std::isfinite(prev_kessel) ? (kessel - prev_kessel) / dt : 0.0f;
+          prev_flow = ist;
+          prev_kessel = kessel;
+  
+          const float slope_th = 0.030f;
+          float close_anticip = 0.0f;
+          bool heat_rising = (dkessel > 0.02f) || (deltaKI > 3.0f);
+          if (heat_rising && d_flow > slope_th) {
+            close_anticip = 160.0f * (d_flow - slope_th);
+            if (close_anticip > 8.0f) close_anticip = 8.0f;
+            base -= close_anticip;
+          }
+  
+          // --- Trim/Bias langsamer ---
+          float pre_demand = base + id(mixer_trim);
+          bool pinned_low  = (pre_demand <= 0.5f);
+          bool pinned_high = (pre_demand >= 99.5f);
+  
+          const float trim_deadband = 0.12f;
+          float Ki_trim = 0.04f * (dt / 60.0f);
+  
+          if (fabsf(error) > trim_deadband) {
+            bool drives_inward = (!pinned_low && !pinned_high) ||
+                                 (pinned_low  && error > 0.0f) ||
+                                 (pinned_high && error < 0.0f);
+            if (drives_inward) {
+              float boost = 1.0f + fminf(fabsf(error), 2.0f) * 0.25f;
+              id(mixer_trim) += error * Ki_trim * boost;
+              if (id(mixer_trim) >  30.0f) id(mixer_trim) =  30.0f;
+              if (id(mixer_trim) < -30.0f) id(mixer_trim) = -30.0f;
+            }
+          }
+  
+          // --- Demand & Limits ---
+          float demand = base + id(mixer_trim);
+          if (!std::isfinite(demand)) demand = 50.0f;
+          if (demand < 0.0f)   demand = 0.0f;
+          if (demand > 100.0f) demand = 100.0f;
+  
+          // --- Glättung etwas träger ---
+          float alpha_smooth;
+          if (fabsf(error) > 1.0f)       alpha_smooth = 0.35f;
+          else if (fabsf(error) > 0.5f)  alpha_smooth = 0.25f;
+          else                           alpha_smooth = 0.20f;
+  
+          static float smoothed = 50.0f;
+          smoothed += alpha_smooth * (demand - smoothed);
+  
+          // --- Slew-Limit enger (0.5..1.0 %/s) ---
+          float rate = 0.5f + fminf(fabsf(error), 1.0f) * 0.5f;
+          float max_step = rate * dt;
+  
+          float out_pct = smoothed;
+          if (id(mixer_invert).state) out_pct = 100.0f - out_pct;
+  
+          static float last_out = 50.0f;
+          if (!std::isfinite(last_out)) last_out = out_pct;
+  
+          float step = out_pct - last_out;
+          if (step >  max_step) out_pct = last_out + max_step;
+          if (step < -max_step) out_pct = last_out - max_step;
+          last_out = out_pct;
+  
+          // --- DAC & safety ---
+          if (std::isfinite(out_pct)) {
+            id(gp8403_output_1).set_level(out_pct / 100.0f);
+            id(mischer_position) = out_pct;
+            id(mischer_position_sensor).publish_state(out_pct);
+          }
+          if (id(mischer_auf).state) id(mischer_auf).turn_off();
+          if (id(mischer_zu).state)  id(mischer_zu).turn_off();
+
+          // ===== Diagnose-Metriken =====
+          
+          // --- 3.1 Regelabweichung RMS (EWMA ~ 30 min) ---
+          {
+            const float tau = 1800.0f;                         // 30 min
+            float alpha = 1.0f - expf(-dt / tau);
+            float e2 = error * error;
+            id(reg_ewma_err2) += alpha * (e2 - id(reg_ewma_err2));
+          }
+          
+          // --- 3.2 Mischeraktivität pro Stunde ---
+          {
+            float delta = fabsf(out_pct - id(last_metrics_out));
+            float rate = (dt > 0.0f) ? (delta / dt) : 0.0f;    // %/s
+            const float tau = 3600.0f;                         // 1 h
+            float alpha = 1.0f - expf(-dt / tau);
+            id(move_rate_ewma) += alpha * (rate - id(move_rate_ewma));
+            id(last_metrics_out) = out_pct;
+          }
+          
+          // --- 3.3 Schwingungs-Detektor (Zero-Cross + Amplitude) ---
+          {
+            // Peaks sammeln
+            if (error >= 0.0f) {
+              if (error > id(osc_peak_pos)) id(osc_peak_pos) = error;
+            } else {
+              if (error < id(osc_peak_neg)) id(osc_peak_neg) = error;
+            }
+          
+            // Vorzeichen
+            int sgn = (error > 0.0f) - (error < 0.0f);
+            const uint32_t now_ms = millis();
+          
+            if (sgn != 0 && id(osc_prev_sign) != 0 && sgn != id(osc_prev_sign)) {
+              // Zero-Cross erkannt
+              float period = (id(osc_last_cross_ms) == 0) ? 0.0f
+                              : (now_ms - id(osc_last_cross_ms)) / 1000.0f;
+              id(osc_last_cross_ms) = now_ms;
+          
+              // Amplitude aus letzten Peaks
+              float amp = fmaxf(0.0f, id(osc_peak_pos) - id(osc_peak_neg));
+              id(osc_peak_pos) = -1e9;   // reset
+              id(osc_peak_neg) =  1e9;
+          
+              // EMAs aktualisieren (träge, aber reaktionsfähig)
+              if (period > 0.0f) {
+                float aP = 0.3f;                         // Perioden-EMA
+                id(osc_period_ema) = (id(osc_period_ema) == 0.0f)
+                                     ? period : id(osc_period_ema) + aP * (period - id(osc_period_ema));
+              }
+              {
+                float aA = 0.3f;                         // Amplituden-EMA
+                id(osc_amp_ema) = (id(osc_amp_ema) == 0.0f)
+                                  ? amp : id(osc_amp_ema) + aA * (amp - id(osc_amp_ema));
+              }
+            }
+            id(osc_prev_sign) = sgn;
+          
+            // Kriterium: ausreichende Amplitude + plausible Periode
+            bool osc = (id(osc_amp_ema) >= 0.6f) &&       // ≥ 0.6 K
+                       (id(osc_period_ema) >= 60.0f) &&   // 1…10 min
+                       (id(osc_period_ema) <= 600.0f);
+          
+            // --- Publish der Metriken alle 60 s ---
+            if (id(last_publish_metrics_ms) == 0 || (now_ms - id(last_publish_metrics_ms) >= 60000)) {
+              id(last_publish_metrics_ms) = now_ms;
+          
+              // RMS
+              float rms = sqrtf(fmaxf(id(reg_ewma_err2), 0.0f));
+              id(rms_err_30m).publish_state(rms);
+          
+              // Aktivität/h
+              float per_h = id(move_rate_ewma) * 3600.0f;     // %/h
+              id(mixer_activity_per_h).publish_state(per_h);
+          
+              // Schwingungswerte
+              id(osc_period_s).publish_state(id(osc_period_ema) > 0.0f ? id(osc_period_ema) : 0.0f);
+              id(osc_detected).publish_state(osc);
+            }
+          }
+          // ===== Ende Diagnose-Metriken =====
+
+
+          ESP_LOGI("MIXER_FAST",
+                   "dt=%.1fs err=%.2fK pid=%.2f ff=%.2f d_flow=%.3fC/s dK=%.3fC/s ant=%.1f base=%.1f trim=%.2f out=%.1f a=%.2f",
+                   dt, error, pid, ff, d_flow, dkessel, close_anticip, base, id(mixer_trim), out_pct, alpha_smooth);
+  - interval: 30s
+    then:
+      - lambda: |-
+          // Sensor validity & safety
+          if (!std::isfinite(id(kesseltemperatur).state) ||
+              !std::isfinite(id(warmwassertemperatur).state) ||
+              !std::isfinite(id(vorlauftemperatur).state)) {
+            ESP_LOGW("Control", "Ungültige Sensorwerte: Kessel=%.2f, WW=%.2f, VL=%.2f",
+                     id(kesseltemperatur).state, id(warmwassertemperatur).state, id(vorlauftemperatur).state);
+            id(invalid_sensor_count)++;
+            if (id(invalid_sensor_count) >= 3) {
+              id(warmwasserpumpe).turn_off();
+              id(brenner).turn_off();
+              id(heizkreispumpe).turn_off();
+              // force analog close
+              id(close_mixer_analog).execute();
+              id(invalid_sensor_count) = 0;
+            }
+            return;
+          }
+          id(invalid_sensor_count) = 0;
+
+          // Mode handling
+          if (id(heizmodus) == "summer") {
+            id(heizkreispumpe).turn_off();
+            id(close_mixer_analog).execute();
+          } else if (id(heizmodus) == "pool") {
+            id(heizkreispumpe).turn_off();
+            id(warmwasserpumpe).turn_off();
+            id(close_mixer_analog).execute();
+          } else if (id(heizmodus) == std::string("winter")) {
+            // Winter: pump on, mixer fully controlled by 5s loop
+            id(heizkreispumpe).turn_on();
+            // make sure relays stay off in analog mode
+            if (id(mischer_auf).state) id(mischer_auf).turn_off();
+            if (id(mischer_zu).state)  id(mischer_zu).turn_off();
+          }
+
+          // --- Warmwasser & Brenner (unchanged) ---
+          float warmwasser_soll = id(warmwasser_zieltemperatur);
+          float warmwasser_ist  = id(warmwassertemperatur).state;
+          float kessel_temp     = id(kesseltemperatur).state;
+          //const float hysterese = 2.0f;
+          // WW-Hysterese bleibt fest bei 2 K (nur für DHW-Logik)
+          const float dhw_hysterese = 2.0f;
+          
+          // Einstellbare Kessel-Hysterese (global, wir nutzen kessel_hysterese_winter)
+          float hyst_boiler = 2.0f;  // Fallback
+          {
+            float h = id(kessel_hysterese_winter);
+            if (std::isfinite(h) && h >= 0.1f) hyst_boiler = h;
+          }
+          const float kessel_min_temp = 55.0f;
+          const float kessel_min_hyst = 2.0f;
+
+          if (id(heizmodus) != "pool") {
+            if (warmwasser_ist < warmwasser_soll - dhw_hysterese &&
+                kessel_temp > warmwasser_ist &&
+                (kessel_temp >= kessel_min_temp || id(brenner).state)) {
+              id(warmwasserpumpe).turn_on();
+            } else if (warmwasser_ist >= warmwasser_soll ||
+                       kessel_temp <= warmwasser_ist ||
+                       kessel_temp < kessel_min_temp - kessel_min_hyst) {
+              id(warmwasserpumpe).turn_off();
+            }
+          }
+
+          float kessel_soll = id(vessel_soll); // start with previous for safety
+
+          if (id(heizmodus) == "summer") {
+            bool dhw_demand = (warmwasser_ist < warmwasser_soll - dhw_hysterese);
+            kessel_soll = dhw_demand ? id(kessel_soll_summer_ww) : id(kessel_soll_summer_idle);
+
+          } else if (id(heizmodus) == "pool") {
+            kessel_soll = id(kessel_soll_pool);
+
+          } else { // WINTER
+            if (id(curve_enable)) {
+              // 1) Kessel-Soll an Kurven-VL koppeln (+ Headroom)
+              float vl_sp_curve = std::isfinite(id(curve_vl_target).state) ? id(curve_vl_target).state : id(zieltemperatur);
+              float head        = std::isfinite(id(boiler_headroom)) ? id(boiler_headroom) : 7.0f;
+
+              // Minimumsicherheit: nie unter VL-Soll + 2K
+              float min_need = vl_sp_curve + 2.0f;
+              kessel_soll = vl_sp_curve + head;
+              if (kessel_soll < min_need) kessel_soll = min_need;
+
+              // 2) WW-Bedarf priorisieren (z. B. +5K über WW-Soll)
+              if (warmwasser_ist < warmwasser_soll - dhw_hysterese) {
+                float dhw_need = warmwasser_soll + 5.0f;
+                if (kessel_soll < dhw_need) kessel_soll = dhw_need;
+              }
+              // 3) Grenzen (deine Kurvengrenzen + Headroom) respektieren
+              float kessel_max = id(curve_t_max) + head;  // z. B. 65 + 7 = 72°C
+              if (kessel_soll > kessel_max) kessel_soll = kessel_max;
+
+            } else {
+              // Kurve AUS: wie bisher fester Winter-Kessel-Soll
+              kessel_soll = id(kessel_soll_winter);
+            }
+          }
+
+          id(vessel_soll) = kessel_soll;
+          id(kessel_soll_sensor).publish_state(kessel_soll);
+          
+          // --- Hysterese mit Headroom-Schutz unten & voller Hysterese nach oben ---
+          float min_head_needed;
+          if (id(heizmodus) == std::string("winter") && id(curve_enable)) {
+            float vl_sp_guard = std::isfinite(id(curve_vl_target).state)
+                                  ? id(curve_vl_target).state
+                                  : id(zieltemperatur);
+            float head = std::isfinite(id(boiler_headroom)) ? id(boiler_headroom) : 7.0f;
+            min_head_needed = vl_sp_guard + head;          // nie darunter
+          } else {
+            min_head_needed = id(zieltemperatur) + 2.0f;   // Fallback
+          }
+          
+          float H = hyst_boiler;                            // already validated above
+          
+          // 1) Einschaltgrenze: am Headroom nach unten klemmen
+          float on_threshold = fmaxf(kessel_soll - H, min_head_needed);
+          
+          // 2) Ausschaltgrenze: volle Hysterese nach oben behalten
+          float off_threshold = on_threshold + H;
+          
+          // Optional: Sicherheitsdeckel im Winter, wenn Kurve aktiv
+          if (id(heizmodus) == std::string("winter") && id(curve_enable)) {
+            float head = std::isfinite(id(boiler_headroom)) ? id(boiler_headroom) : 7.0f;
+            float kessel_abs_max = id(curve_t_max) + head;     // z.B. 65 + 10 = 75°C
+            if (off_threshold > kessel_abs_max) off_threshold = kessel_abs_max;
+          }
+          
+          // Brenner EIN/AUS
+          if (kessel_temp < on_threshold) {
+            id(brenner).turn_on();
+          } else if (kessel_temp >= off_threshold) {
+            id(brenner).turn_off();
+          }
+          
+          ESP_LOGI("Brenner",
+                   "hyst=%.1fK  kessel_soll=%.1f  on_th=%.1f  off_th=%.1f  vl_curve=%.1f  head=%.1f",
+                   H, kessel_soll, on_threshold, off_threshold,
+                   std::isfinite(id(curve_vl_target).state) ? id(curve_vl_target).state : NAN,
+                   std::isfinite(id(boiler_headroom)) ? id(boiler_headroom) : NAN);
+
+  - interval: 1s
+    then:
+      - lambda: |-
+          char degC[3] = { (char)0xB0, 'C', 0 };   // "°C" as raw bytes
+          // Clock (HH:MM)
+          if (id(sntp_time).now().is_valid()) {
+            char tbuf[6];
+            snprintf(tbuf, sizeof(tbuf), "%02d:%02d", id(sntp_time).now().hour, id(sntp_time).now().minute);
+            id(nextion_display).set_component_text("home.t_time", tbuf);
+          }
+          // small helper to print temperatures safely
+          auto print_temp = [&](const char* comp, float v) {
+            if (!std::isfinite(v)) {
+              id(nextion_display).set_component_text(comp, "--");
+              return;
+            }
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.1f%s", v, degC);
+            id(nextion_display).set_component_text(comp, buf);
+          };
+          // --- HOME page values ---
+          print_temp("home.t_out", id(outdoor).state);
+          print_temp("home.t_flow", id(vorlauftemperatur).state);
+          print_temp("home.t_flow_sp", id(zieltemperatur));
+          print_temp("home.t_boiler",  id(kesseltemperatur).state);
+          print_temp("home.t_dhw",  id(warmwassertemperatur).state);
+          print_temp("home.t_dhw_sp", id(warmwasser_zieltemperatur));
+          print_temp("home.t_boiler_sp", id(vessel_soll));
+          // Warmwasser-Soll (use your GLOBAL 'warmwasser_zieltemperatur' or the number entity)
+          int rot = 63488;
+          int weiss = 65535;
+          int color = weiss;
+          std::string mode_text;
+
+          // Modustext für UI
+          std::string sel = id(heizmodus_select).state;   // gewählter Modus
+          bool is_winter_auto = id(saison_auto_is_winter);
+
+          if (sel == "pool") {
+            mode_text = "Pool";
+          } else if (sel == "winter") {
+            mode_text = "Winter";
+          } else if (sel == "summer") {
+            mode_text = "Sommer";
+          } else {  // "auto"
+            mode_text = is_winter_auto ? "Auto (Winter)" : "Auto (Sommer)";
+          }
+          id(nextion_display).set_component_text("home.t_mode", mode_text.c_str());
+          // Falls du die Farbe wirklich ändern willst, entkommentieren:
+          // char cmd[48];
+          // snprintf(cmd, sizeof(cmd), "home.t_mode.txt_color=%d", color);
+          // id(nextion_display).send_command(cmd);
+
+          //std::string mode = id(heizmodus);
+          //if (mode == "summer") {
+          //  mode_text = "Sommer";
+          //  color = rot;
+          //} else if (mode == "winter") {
+          //  mode_text = "Winter";
+          //  color = rot;
+          //} else if (mode == "pool") {
+          //  mode_text = "Pool";
+          //  color = rot;
+          //} else {
+          //  mode_text = mode.c_str();
+          //  color = weiss;
+          //}
+          //id(nextion_display).set_component_text("home.t_mode", mode_text.c_str());
+          char cmd[40];
+          snprintf(cmd, sizeof(cmd), "home.t_mode.txt_color=%d", color);
+          //id(nextion_display).send_command(cmd);
+
+          // --- Betriebsstunden Integrator + Persistenz ---
+
+      - lambda: |-
+          // --- Rollendes 24h-Fenster NUR aus brennerbetrieb_bz ---
+          // Zählt Starts (OFF->ON) und aufsummierte ON-Sekunden pro Minute.
+          // 1440-Minuten-Ringpuffer => echte 24h-Gleitfenster.
+          static bool      prev_on = id(brennerbetrieb_bz).state;
+          static uint32_t  t_minute = 0;
+          static int       cur_starts = 0;
+          static float     cur_burn_s = 0.0f;
+          static int       idx = 0;                         // 0..1439
+          static int       buf_starts[1440] = {0};
+          static float     buf_burn_s[1440] = {0.0f};
+          static int       sum_starts = 0;
+          static float     sum_burn_s = 0.0f;
+
+          const bool on = id(brennerbetrieb_bz).state;
+
+          // Rising edge -> Start zählen
+          if (on && !prev_on) {
+            cur_starts += 1;
+          }
+          prev_on = on;
+
+          // Laufzeit sekündlich integrieren (1s Takt)
+          if (on) cur_burn_s += 1.0f;
+
+          // Minutentakt bilden (sauber, nicht driftend)
+          const uint32_t now_ms = millis();
+          if (t_minute == 0) t_minute = now_ms;
+          if (now_ms - t_minute >= 60000) {
+            // Alte Minute am aktuellen idx aus Summe entfernen …
+            sum_starts -= buf_starts[idx];
+            sum_burn_s -= buf_burn_s[idx];
+
+            // … neue Minute schreiben
+            buf_starts[idx] = cur_starts;
+            buf_burn_s[idx] = cur_burn_s;
+
+            // Summen aktualisieren
+            sum_starts += cur_starts;
+            sum_burn_s += cur_burn_s;
+
+            // Index weiterschieben (Ring)
+            idx++;
+            if (idx >= 1440) idx = 0;
+
+            // Aktuelle Minute zurücksetzen
+            cur_starts = 0;
+            cur_burn_s = 0.0f;
+
+            // Nächsten Minutentick setzen (bewusst +60000, um Drift zu minimieren)
+            t_minute += 60000;
+
+            // Ableiten und publishen
+            const float hrs = sum_burn_s / 3600.0f;
+            const float per_h = (hrs > 0.0f) ? ( (float)sum_starts / hrs ) : 0.0f;
+
+            id(bz_starts_24h_sensor).publish_state((float)sum_starts);
+            id(bz_burn_hours_24h_sensor).publish_state(hrs);
+            id(bz_starts_per_burn_hour_24h_sensor).publish_state(per_h);
+
+            ESP_LOGD("BZ24h",
+                     "24h: starts=%d  burn=%.2fh  metric=%.2f/h",
+                     sum_starts, hrs, per_h);
+          }
+      - lambda: |-
+          const uint32_t now = millis();
+          float dt = (id(burn_last_ms) == 0) ? 0.0f : (now - id(burn_last_ms)) / 1000.0f;
+          id(burn_last_ms) = now;
+          if (dt < 0.0f || dt > 10.0f) dt = 0.0f;  // Sanity
+
+          // "Brenner läuft" über Relais-Status ODER BZ-Eingang
+          const bool burning = id(brenner).state || id(brennerbetrieb_bz).state;
+
+          if (burning && dt > 0.0f) {
+            const float dh = dt / 3600.0f;              // Sekunden -> Stunden
+            id(brenner_betriebsstunden) += dh;
+            id(burn_unsaved_h) += dh;
+          }
+
+          // Sensor 1x/min explizit publizieren (unabhängig vom update_interval)
+          static uint32_t t_pub = 0;
+          if (now - t_pub >= 60000) {
+            id(brenner_betriebsstunden_sensor).publish_state(id(brenner_betriebsstunden));
+            t_pub = now;
+          }
+
+          // ~0.05 h akkumuliert? -> in FRAM/EERPOM schreiben (Adresse 0x0000)
+          if (id(burn_unsaved_h) >= 0.05f) {
+            float val = id(brenner_betriebsstunden);
+            uint8_t packet[6];
+            packet[0] = 0x00; packet[1] = 0x00;         // High, Low (Adresse 0x0000)
+            memcpy(&packet[2], &val, sizeof(val));
+            auto dev = id(eeprom);
+            if (dev->write(packet, sizeof(packet)) == esphome::i2c::ErrorCode::ERROR_OK) {
+              delay(5);  // write cycle
+              id(burn_unsaved_h) = 0.0f;
+              ESP_LOGD("FRAM","Betriebsstunden gespeichert: %.3f h", val);
+            } else {
+              ESP_LOGW("FRAM","Schreiben fehlgeschlagen, wird später erneut versucht.");
+            }
+          }
+  - interval: 2s
+    then:
+      - lambda: |-
+          ESP_LOGD("MODE", "select='%s'  heizmodus='%s'",
+                   id(heizmodus_select).state.c_str(), id(heizmodus).c_str());
+  - interval: 60s
+    then:
+      - script.execute: saison_update_logic

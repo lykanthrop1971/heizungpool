@@ -1,0 +1,53 @@
+substitutions:
+  fw_version: "0.9.0"
+
+esphome:
+  name: a6v3
+  friendly_name: a6v3
+  project:
+    name: "kc868.a6-heizung"
+    version: "${fw_version}"
+  # wenn dich die WARNINGS nerven, kannst du die build_flags unten löschen
+  platformio_options:
+    lib_deps:
+      - adafruit/Adafruit BusIO @ ^1.14.5
+    lib_ldf_mode: deep+
+    build_flags:
+      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Wire/src
+      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Network/src
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+
+logger:
+  level: DEBUG
+
+api:
+  password: ""
+  services:
+    - service: set_zieltemperatur
+      variables:
+        temp: float
+      then:
+        - lambda: |-
+            id(zieltemperatur) = temp;
+            id(pid_integral) = 0.0;
+            id(pid_last_error) = 0.0;
+            ESP_LOGI("PID", "Zieltemperatur gesetzt: %.2f, Integral und Last Error zurückgesetzt.", temp);
+
+ota:
+  platform: esphome
+  password: !secret ota_password
+
+captive_portal:
+
+packages:
+  heizung: !include heizung.yaml
+  pool: !include pool.yaml
