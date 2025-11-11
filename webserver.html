@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>Heizungssteuerung</title>
+  <link rel="stylesheet" href="webserver.css">
+  <script src="webserver.js"></script>
+</head>
+<body>
+  <h1>Heizungssteuerung</h1>
+
+  <!-- Heizungseinstellungen -->
+  <div class="card">
+    <h2>Heizung</h2>
+    <div class="sensor-grid">
+      <div class="sensor-item">
+        <strong>Betriebsmodus:</strong>
+        <select id="heizmodus" onchange="setHeizmodus()">
+          <option value="summer">Sommer</option>
+          <option value="winter">Winter</option>
+          <option value="pool">Pool</option>
+        </select>
+      </div>
+      <div class="sensor-item">
+        <strong>Zieltemperatur Vorlauf:</strong>
+        <input type="number" id="zieltemperatur" min="20" max="60" step="1">
+        <button onclick="setZieltemperatur()">Setzen</button>
+        <span id="zieltemperatur_sensor"></span> °C
+      </div>
+      <div class="sensor-item">
+        <strong>Zieltemperatur Warmwasser:</strong>
+        <input type="number" id="warmwasser_zieltemperatur" min="30" max="60" step="1">
+        <button onclick="setWarmwasserZieltemperatur()">Setzen</button>
+        <span id="warmwasser_zieltemperatur_sensor"></span> °C
+      </div>
+      <div class="sensor-item">
+        <strong>Legionellenschaltung:</strong>
+        <input type="checkbox" id="legionellen_enable" onchange="toggleLegionellen()" />
+        <label for="legionellen_enable">aktiv</label>
+      </div>
+      <div class="sensor-item">
+        <strong>Mischer Laufzeit:</strong>
+        <input type="number" id="mischer_laufzeit_input" min="60" max="300" step="1">
+        <button onclick="setMischerLaufzeit()">Setzen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Board/Systemeinstellungen -->
+  <div class="card">
+    <h2>Board & System</h2>
+    <div class="sensor-grid">
+      <div class="sensor-item">
+        <strong>WLAN Qualität:</strong>
+        <span id="wlan_qualitaet"></span> %
+      </div>
+      <div class="sensor-item">
+        <strong>Laufzeit:</strong>
+        <span id="laufzeit_formatiert"></span>
+      </div>
+      <div class="sensor-item">
+        <button onclick="location.reload()">Neustart</button>
+        <button onclick="resetSettings()">Reset Einstellungen</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

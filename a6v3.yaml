@@ -4,10 +4,12 @@ substitutions:
 esphome:
   name: a6v3
   friendly_name: a6v3
+  includes:
+    - webui.h        # Enthält dein eigenes HTML-UI
   project:
     name: "kc868.a6-heizung"
     version: "${fw_version}"
-  # wenn dich die WARNINGS nerven, kannst du die build_flags unten löschen
+  # Build-Optionen (optional, können gelöscht werden wenn störend)
   platformio_options:
     lib_deps:
       - adafruit/Adafruit BusIO @ ^1.14.5
@@ -21,14 +23,24 @@ esp32:
   framework:
     type: arduino
 
+# WLAN
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   ap:
 
+# Lokaler Webserver (Port 80)
+web_server:
+  port: 80
+  auth:
+    username: admin
+    password: heizung123
+
+# Logger (Debug für Tests)
 logger:
   level: DEBUG
 
+# Home Assistant / API Verbindung
 api:
   password: ""
   services:
@@ -42,12 +54,15 @@ api:
             id(pid_last_error) = 0.0;
             ESP_LOGI("PID", "Zieltemperatur gesetzt: %.2f, Integral und Last Error zurückgesetzt.", temp);
 
+# OTA Updates
 ota:
   platform: esphome
   password: !secret ota_password
 
+# Fallback-Portal (bei WLAN-Verbindungsfehler)
 captive_portal:
 
+# Integriere bestehende Logik aus den Paketdateien
 packages:
   heizung: !include heizung.yaml
   pool: !include pool.yaml
