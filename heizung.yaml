@@ -529,7 +529,10 @@ globals:
     type: float
     restore_value: no
     initial_value: "1e9"
-
+  - id: legionella_target
+    type: float
+    initial_value: '70.0'    # bisheriger Hardcode-Wert
+    restore_value: true      # Wert über Neustarts behalten
 
 select:
   - platform: template
@@ -807,6 +810,14 @@ binary_sensor:
     id: osc_detected
     device_class: problem
 
+  - platform: template
+    name: "Heizkreispumpe Status"
+    lambda: |-
+      return id(heizkreispumpe).state;
+  - platform: template
+    name: "Warmwasserpumpe Status"
+    lambda: |-
+      return id(warmwasserpumpe).state;
 script:
   - id: set_mode_from_hmi
     parameters:
@@ -1010,7 +1021,7 @@ button:
     name: "TUF Password Reset"
     on_press:
       - number.set: { id: tuf_lock_reg_49, value: 0 }
-      - delay: 200ms
+      - delay: 1000ms
       - number.set: { id: tuf_lock_reg_50, value: 0 }
 
 sensor:
@@ -1904,6 +1915,7 @@ sensor:
     name: "Mischeraktivität /h"
     id: mixer_activity_per_h
     unit_of_measurement: "%/h"
+    state_class: measurement
     accuracy_decimals: 0
   - platform: template
     name: "Schwingungsperiode (EMA)"
@@ -2140,7 +2152,22 @@ number:
     restore_value: true
     initial_value: 2.0
 
+  - platform: template
+    name: "Legionellen-Solltemperatur"
+    id: legionella_target_number
+    icon: "mdi:temperature-celsius"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    optimistic: true
+    min_value: 50
+    max_value: 80
+    step: 1
 
+    set_action:
+      then:
+        - globals.set:
+            id: legionella_target
+            value: !lambda 'return x;'
 
 time:
   - platform: sntp
@@ -2156,16 +2183,28 @@ time:
                 switch.is_on: legionellen_enable
               then:
                 - lambda: |-
-                    id(warmwasser_zieltemperatur_backup) = id(warmwasser_zieltemperatur); // Backup aktuelle Temperatur
-                    id(warmwasser_zieltemperatur) = 70.0f;
-                    id(warmwasser_zieltemperatur_input).publish_state(70.0f);
-                    ESP_LOGI("Legionellen", "Legionellen-Schaltung gestartet: Warmwasser-Zieltemperatur auf 70°C gesetzt (Backup: %.1f°C)", id(warmwasser_zieltemperatur_backup));
-                - delay: 3h
-                - lambda: |-
-                    id(warmwasser_zieltemperatur) = id(warmwasser_zieltemperatur_backup); // Wiederherstellen
-                    id(warmwasser_zieltemperatur_input).publish_state(id(warmwasser_zieltemperatur_backup));
-                    ESP_LOGI("Legionellen", "Legionellen-Schaltung beendet: Warmwasser-Zieltemperatur zurück auf %.1f°C", id(warmwasser_zieltemperatur_backup));
+                    // Aktuelle Warmwasser-Solltemperatur sichern
+                    id(warmwasser_zieltemperatur_backup) = id(warmwasser_zieltemperatur);
 
+                    // Auf einstellbaren Legionellen-Zielwert hochsetzen
+                    id(warmwasser_zieltemperatur) = id(legionella_target);
+                    id(warmwasser_zieltemperatur_input).publish_state(id(legionella_target));
+
+                    ESP_LOGI("Legionellen",
+                             "Legionellen-Schaltung gestartet: Warmwasser-Zieltemperatur auf %.1f°C gesetzt (Backup: %.1f°C)",
+                             id(legionella_target),
+                             id(warmwasser_zieltemperatur_backup));
+
+                - delay: 3h
+
+                - lambda: |-
+                    // Ursprüngliche Solltemperatur wiederherstellen
+                    id(warmwasser_zieltemperatur) = id(warmwasser_zieltemperatur_backup);
+                    id(warmwasser_zieltemperatur_input).publish_state(id(warmwasser_zieltemperatur_backup));
+
+                    ESP_LOGI("Legionellen",
+                             "Legionellen-Schaltung beendet: Warmwasser-Zieltemperatur zurück auf %.1f°C",
+                             id(warmwasser_zieltemperatur_backup));
 
 interval:
   - interval: 10s   # ruhigerer Regeltakt
