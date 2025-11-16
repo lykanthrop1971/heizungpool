@@ -1,12 +1,19 @@
 substitutions:
   pool_prefix: "pool_"
 
-switch:
-  - platform: template
-    name: "${pool_prefix}auto"
-    id: pool_auto
-    optimistic: true
-    restore_mode: RESTORE_DEFAULT_ON
+mqtt:
+  broker: 192.168.1.128   # <-- anpassen auf deinen Broker
+  port: 1883
+  username: mqttbroker           # ggf. anpassen/entfernen
+  password: mqttbroker           # ggf. anpassen/entfernen
+  discovery: false     
+
+#switch:
+#  - platform: template
+#    name: "${pool_prefix}auto"
+#    id: pool_auto
+#    optimistic: true
+#    restore_mode: RESTORE_DEFAULT_ON
 
 # später:
 # sensor:
@@ -17,3 +24,301 @@ switch:
 # script:
 #   - id: pool_regel
 
+# -------------------------
+# Globals: Dosier-Sperrzeiten (Millis seit Start)
+# -------------------------
+globals:
+  - id: last_chlor_dose
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: last_ph_dose
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+# -------------------------
+# Sensoren vom Arduino UNO (MQTT)
+# -------------------------
+sensor:
+  # pH-Wert vom UNO
+  - platform: mqtt_subscribe
+    id: ph_sensor
+    name: "Pool pH (UNO)"
+    topic: sensor/ph
+    unit_of_measurement: "pH"
+    accuracy_decimals: 2
+    filters:
+      - clamp:
+          min_value: 5.5
+          max_value: 9.0
+      - median:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
+
+  # ORP-Wert vom UNO
+  - platform: mqtt_subscribe
+    id: orp_sensor
+    name: "Pool ORP (UNO)"
+    topic: sensor/orp
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    filters:
+      - clamp:
+          min_value: 400.0
+          max_value: 900.0
+      - median:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
+
+  # Temperatur (RTD) vom UNO
+  - platform: mqtt_subscribe
+    id: temp_sensor
+    name: "Pool Temperatur (UNO)"
+    topic: sensor/rtd
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - clamp:
+          min_value: 0.0
+          max_value: 40.0
+      - median:
+          window_size: 5
+          send_every: 1
+          send_first_at: 1
+
+  # Optional: Analogkanäle vom UNO
+  - platform: mqtt_subscribe
+    id: a0_sensor
+    name: "Pool A0 (UNO)"
+    topic: sensor/a0
+    accuracy_decimals: 2
+
+  - platform: mqtt_subscribe
+    id: a1_sensor
+    name: "Pool A1 (UNO)"
+    topic: sensor/a1
+    accuracy_decimals: 2
+
+# -------------------------
+# Text-Sensoren (UNO-Status, Shelly-Status)
+# -------------------------
+text_sensor:
+  # Kalibrierstatus vom UNO
+  - platform: mqtt_subscribe
+    id: cal_status
+    name: "Pool Kalibrierstatus"
+    topic: sensor/cal
+
+  # Status des Shelly-Relais 1 (GEN2-Status-Topic)
+  - platform: mqtt_subscribe
+    id: chlor_pumpe_status_raw
+    name: "Chlor Pumpe Status (Shelly Raw)"
+    topic: "shellypro2-ec626091d068/status/switch:1"
+
+# -------------------------
+# Einstellbare Parameter (in HA sichtbar)
+# -------------------------
+number:
+  - platform: template
+    id: ph_soll_num
+    name: "Pool pH Sollwert"
+    min_value: 6.8
+    max_value: 7.8
+    step: 0.05
+    optimistic: true
+    initial_value: 7.2
+
+  - platform: template
+    id: ph_band_num
+    name: "pH Hysterese"
+    min_value: 0.05
+    max_value: 0.5
+    step: 0.05
+    optimistic: true
+    initial_value: 0.1
+
+  - platform: template
+    id: orp_soll_num
+    name: "ORP Sollwert"
+    min_value: 600
+    max_value: 800
+    step: 10
+    optimistic: true
+    initial_value: 700
+
+  - platform: template
+    id: orp_band_num
+    name: "ORP Hysterese"
+    min_value: 10
+    max_value: 100
+    step: 5
+    optimistic: true
+    initial_value: 20
+
+  - platform: template
+    id: chlor_dosier_dauer_num
+    name: "Chlor Dosierdauer (s)"
+    min_value: 5
+    max_value: 120
+    step: 5
+    optimistic: true
+    initial_value: 20
+
+  - platform: template
+    id: ph_dosier_dauer_num
+    name: "pH-Minus Dosierdauer (s)"
+    min_value: 5
+    max_value: 120
+    step: 5
+    optimistic: true
+    initial_value: 20
+
+# -------------------------
+# Schalter (Shelly-Pumpen + Automatik)
+# -------------------------
+switch:
+  # Master-Schalter für die automatische Dosierung
+  - platform: template
+    id: dosierung_enable
+    name: "Pooldosierung aktiv"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  # Chlorpumpe: Shelly Pro 2, Switch 1
+  - platform: template
+    id: chlor_pumpe
+    name: "Chlor Pumpe (Shelly Pro 2 Relay 1)"
+    optimistic: true
+    turn_on_action:
+      - mqtt.publish:
+          topic: "shellypro2-ec626091d068/command/switch:1"
+          payload: "on"
+          qos: 1
+          retain: false
+      - logger.log: "Shelly Pro 2 Relay 1 -> ON via MQTT"
+    turn_off_action:
+      - mqtt.publish:
+          topic: "shellypro2-ec626091d068/command/switch:1"
+          payload: "off"
+          qos: 1
+          retain: false
+      - logger.log: "Shelly Pro 2 Relay 1 -> OFF via MQTT"
+
+  # pH-Minus-Pumpe: Shelly Pro 2, Switch 0 (optional)
+  - platform: template
+    id: ph_minus_pumpe
+    name: "pH-Minus Pumpe (Shelly Pro 2 Relay 0)"
+    optimistic: true
+    turn_on_action:
+      - mqtt.publish:
+          topic: "shellypro2-ec626091d068/command/switch:0"
+          payload: "on"
+          qos: 1
+          retain: false
+      - logger.log: "Shelly Pro 2 Relay 0 -> ON via MQTT"
+    turn_off_action:
+      - mqtt.publish:
+          topic: "shellypro2-ec626091d068/command/switch:0"
+          payload: "off"
+          qos: 1
+          retain: false
+      - logger.log: "Shelly Pro 2 Relay 0 -> OFF via MQTT"
+
+# -------------------------
+# Scripts für Dosier-Stöße
+# -------------------------
+script:
+  - id: chlor_dosierung
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(dosierung_enable).state && !id(chlor_pumpe).state;
+          then:
+            - switch.turn_on: chlor_pumpe
+            - delay: !lambda "return (uint32_t)(id(chlor_dosier_dauer_num).state * 1000.0f);"
+            - switch.turn_off: chlor_pumpe
+
+  - id: ph_minus_dosierung
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return id(dosierung_enable).state && !id(ph_minus_pumpe).state;
+          then:
+            - switch.turn_on: ph_minus_pumpe
+            - delay: !lambda "return (uint32_t)(id(ph_dosier_dauer_num).state * 1000.0f);"
+            - switch.turn_off: ph_minus_pumpe
+
+# -------------------------
+# Regel-Logik (pH & ORP)
+# -------------------------
+interval:
+  - interval: 60s
+    then:
+      - lambda: |-
+          if (!id(dosierung_enable).state) {
+            ESP_LOGD("POOL", "Dosierung deaktiviert, keine Regelaktion.");
+            return;
+          }
+
+          const float ph      = id(ph_sensor).state;
+          const float ph_soll = id(ph_soll_num).state;
+          const float ph_band = id(ph_band_num).state;
+
+          const float orp      = id(orp_sensor).state;
+          const float orp_soll = id(orp_soll_num).state;
+          const float orp_band = id(orp_band_num).state;
+
+          const float temp = id(temp_sensor).state;
+
+          // Unter 10°C keine Dosierung
+          if (!isnan(temp) && temp < 10.0f) {
+            ESP_LOGW("POOL", "Wassertemperatur = %.1f°C < 10°C, keine Dosierung.", temp);
+            return;
+          }
+
+          const uint32_t now = millis();
+          const uint32_t min_pause_ms = 300000UL;  // 5 Minuten Mindestabstand
+
+          // --- pH-Regelung ---
+          if (!isnan(ph) && !isnan(ph_soll) && !isnan(ph_band) && ph > 0.0f) {
+            ESP_LOGD("POOL", "pH=%.2f, Soll=%.2f, Band=%.2f", ph, ph_soll, ph_band);
+
+            if (ph > ph_soll + ph_band) {
+              if (now - id(last_ph_dose) > min_pause_ms) {
+                ESP_LOGI("POOL", "pH=%.2f > Soll+Band (%.2f) -> pH-Minus dosieren", ph, ph_soll + ph_band);
+                id(last_ph_dose) = now;
+                id(ph_minus_dosierung).execute();
+              } else {
+                ESP_LOGI("POOL", "pH zu hoch, aber Mindestpause pH-Dosierung noch nicht abgelaufen.");
+              }
+            }
+          } else {
+            ESP_LOGW("POOL", "pH-Wert oder pH-Parameter ungueltig, keine pH-Regelung.");
+          }
+
+          // --- ORP-Regelung ---
+          if (!isnan(orp) && !isnan(orp_soll) && !isnan(orp_band) && orp > 0.0f) {
+            ESP_LOGD("POOL", "ORP=%.0f mV, Soll=%.0f, Band=%.0f", orp, orp_soll, orp_band);
+
+            if (orp < orp_soll - orp_band) {
+              if (now - id(last_chlor_dose) > min_pause_ms) {
+                ESP_LOGI("POOL", "ORP=%.0f < Soll-Band (%.0f) -> Chlor dosieren", orp, orp_soll - orp_band);
+                id(last_chlor_dose) = now;
+                id(chlor_dosierung).execute();
+              } else {
+                ESP_LOGI("POOL", "ORP zu niedrig, aber Mindestpause Chlor-Dosierung noch nicht abgelaufen.");
+              }
+            }
+          } else {
+            ESP_LOGW("POOL", "ORP-Wert oder ORP-Parameter ungueltig, keine ORP-Regelung.");
+          }
