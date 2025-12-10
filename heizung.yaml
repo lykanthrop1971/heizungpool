@@ -145,12 +145,27 @@ modbus_controller:
     address: 1
     modbus_id: modbus_bus
     setup_priority: -10
-    update_interval: 2s
+    update_interval: 5s
     command_throttle: 200ms
   - id: tuf2000m
     address: 2
     modbus_id: modbus_bus
+    update_interval: 10s
+  - id: tuf2000b
+    address: 3
+    modbus_id: modbus_bus
+    update_interval: 10s
+  - id: pta8c04
+    address: 101          # RS485-Adresse des PTA8C04
+    modbus_id: modbus_bus  
+    setup_priority: -10
+    update_interval: 5s 
+  - id: nt18b07
+    address: 100          # RS485-Adresse des NT18B07
+    modbus_id: modbus_bus
+    setup_priority: -10
     update_interval: 5s
+    command_throttle: 200ms   
 
 gp8403:
   id: my_gp8403
@@ -1106,7 +1121,7 @@ sensor:
     accuracy_decimals: 1
     update_interval: never
   
-  # Raw Modbus reader
+  # Rohwert aus Modbus
   - platform: modbus_controller
     modbus_controller_id: mb_ctrl
     id: vl_raw
@@ -1116,37 +1131,45 @@ sensor:
     value_type: U_WORD
     lambda: |-
       const uint16_t reg = x;
-      if (reg == 0x7FFF) { ESP_LOGW("modbus","[VL] raw=0x7FFF -> invalid"); return NAN; }
+
+      // Fehlercode ausblenden
+      if (reg == 0x7FFF) {
+        ESP_LOGW("modbus","[VL] raw=0x7FFF -> invalid");
+        return NAN;
+      }
+
+      // ggf. hier weitere Codes filtern (z.B. 0xFFFF oder 0x0000), falls nötig
+      // if (reg == 0xFFFF || reg == 0x0000) {
+      //   ESP_LOGW("modbus","[VL] raw=0x%04X -> invalid", reg);
+      //   return NAN;
+      // }
+
       return (float)reg * 0.1f;
   
     on_value:
       then:
         - lambda: |-
-            const float v = id(vl_raw).state;
-            const uint32_t now = millis();
-            const float MIN=-40, MAX=120, MAXJ=5.0f, A=0.25f;
-            const uint32_t STALE=5UL*60UL*1000UL;
-  
-            bool ok = isfinite(v) && v>=MIN && v<=MAX;
-            if (!ok) ESP_LOGW("modbus","[VL] reject bounds/NaN v=%.2f", v);
-            if (ok && isfinite(id(g_vl_last))) {
-              float dv=fabsf(v-id(g_vl_last));
-              if (dv>MAXJ) { ok=false; ESP_LOGW("modbus","[VL] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, MAXJ, id(g_vl_last), v); }
+            const float v = x;  // aktuelles Sample
+            const float MIN = -40.0f;
+            const float MAX = 120.0f;
+            const float A   = 0.25f;   // Glättung
+
+            // einfache Plausibilitätsprüfung
+            if (!isfinite(v) || v < MIN || v > MAX) {
+              ESP_LOGW("modbus","[VL] invalid v=%.2f (out of bounds)", v);
+              return;
             }
-  
-            if (ok) {
-              if (isfinite(id(g_vl_ema))) id(g_vl_ema) += A*(v-id(g_vl_ema)); else id(g_vl_ema)=v;
-              float out = roundf(id(g_vl_ema)*10)/10.0f;
-              id(vorlauftemperatur).publish_state(out);
-              id(g_vl_last)=out; id(g_vl_ms)=now; id(g_vl_inv)=0;
+
+            // Exponential Moving Average
+            if (isfinite(id(g_vl_ema))) {
+              id(g_vl_ema) += A * (v - id(g_vl_ema));
             } else {
-              id(g_vl_inv)++;
-              if (isfinite(id(g_vl_last)) && (id(g_vl_inv)>5 || (now-id(g_vl_ms))>STALE)) {
-                ESP_LOGW("modbus","[VL] stale republish last=%.1f inv=%d age=%lus",
-                         id(g_vl_last), id(g_vl_inv), (unsigned long)((now-id(g_vl_ms))/1000));
-                id(vorlauftemperatur).publish_state(id(g_vl_last));
-              }
+              // erster gültiger Wert
+              id(g_vl_ema) = v;
             }
+
+            float out = roundf(id(g_vl_ema) * 10.0f) / 10.0f;
+            id(vorlauftemperatur).publish_state(out);
   
   # ------------------ Kessel (0x0001) ------------------
   - platform: template
@@ -1163,7 +1186,7 @@ sensor:
     id: k_raw
     internal: true
     register_type: holding
-    address: 0x0001
+    address: 0x0003
     value_type: U_WORD
     lambda: |-
       const uint16_t reg = x;
@@ -1396,25 +1419,28 @@ sensor:
         - script.execute: saison_update_logic
   
   # ------------------ Temp5 (0x0004) ------------------
+  # Öffentlicher "clean" Sensor für HA
   - platform: template
-    id:  temp5
+    id: temp5
     name: "Temp5"
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
     accuracy_decimals: 1
     update_interval: never
-  
+
+  # Rohwert aus Modbus + Filterkette
   - platform: modbus_controller
     modbus_controller_id: mb_ctrl
     id: t5_raw
-
     internal: true
     register_type: holding
     address: 0x0004
     value_type: U_WORD
+    lambda: |-
+      return x * 0.1f;
     filters:
-      # 1) Median glättet einzelne Ausreißer in der Nachbarschaft
+      # 1) Median glättet einzelne Ausreißer
       - median:
           window_size: 5
           send_every: 1
@@ -1429,14 +1455,14 @@ sensor:
           const uint32_t now = millis();
           const float dt = last_ms ? (now - last_ms) / 1000.0f : 5.0f;
 
-          if (!std::isfinite(x)) return last;     // halte letzten guten Wert
-          if (!std::isfinite(last)) {             // Initialisierung
+          if (!isfinite(x)) return last;     // halte letzten guten Wert
+          if (!isfinite(last)) {             // Initialisierung
             last = x; last_ms = now; return x;
           }
 
           float dx = x - last;
-          if (fabsf(dx) > MAX_JUMP) {             // Spike erkannt
-            float max_step = MAX_RATE * dt;       // begrenze Sprunghöhe
+          if (fabsf(dx) > MAX_JUMP) {        // Spike erkannt
+            float max_step = MAX_RATE * dt;  // begrenze Sprunghöhe
             if (fabsf(dx) > max_step)
               x = last + (dx > 0 ? max_step : -max_step);
           }
@@ -1445,10 +1471,26 @@ sensor:
           last_ms = now;
           return x;
 
-      # 3) EMA fürs sanfte Nachziehen (keine Farbe, wenig Verzögerung)
+      # 3) EMA fürs sanfte Nachziehen
       - exponential_moving_average:
           alpha: 0.2
           send_every: 1
+
+    on_value:
+      then:
+        - lambda: |-
+            const float v = x;  // bereits gefilterter Wert
+
+            const float MIN = -40.0f;
+            const float MAX = 120.0f;
+
+            if (!isfinite(v) || v < MIN || v > MAX) {
+              ESP_LOGW("modbus", "[T5] invalid v=%.2f (out of bounds)", v);
+              return;
+            }
+
+            // Direkt an den Template-Sensor veröffentlichen
+            id(temp5).publish_state(v);
   
   # ------------------ Temp6 (0x0005) ------------------
   - platform: template
@@ -1557,14 +1599,14 @@ sensor:
     device_class: temperature
     state_class: measurement
     accuracy_decimals: 1
-    update_interval: 2s
+    update_interval: never
   
   - platform: modbus_controller
     modbus_controller_id: mb_ctrl
     id: t7_raw
     internal: true
     register_type: holding
-    address: 0x0003
+    address: 0x0001
     value_type: U_WORD
     lambda: |-
       const uint16_t reg = x;
@@ -1694,13 +1736,181 @@ sensor:
             }
 
 
+  # PTA8C04 – PT100 Temperaturen, je 0.1 °C, signed 16 bit
+  - platform: modbus_controller
+    modbus_controller_id: pta8c04
+    id: pta8c04_ch0_temp
+    name: "PT100 CH0 Temperatur"
+    address: 0x0000
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
 
+  - platform: modbus_controller
+    modbus_controller_id: pta8c04
+    id: pta8c04_ch1_temp
+    name: "PT100 CH1 Temperatur"
+    address: 0x0001
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
 
+  - platform: modbus_controller
+    modbus_controller_id: pta8c04
+    id: pta8c04_ch2_temp
+    name: "PT100 CH2 Temperatur"
+    address: 0x0002
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: pta8c04
+    id: pta8c04_ch3_temp
+    name: "PT100 CH3 Temperatur"
+    address: 0x0003
+    register_type: holding
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  # ======================================================
+  # NT18B07 – 7x NTC-Kanäle, je 0.1 °C, signed 16-bit
+  # Register 0x0000–0x0006 = CH1–CH7 Temperatur
+  # ======================================================
+
+  - platform: modbus_controller
+    modbus_controller_id: nt18b07
+    id: nt18b07_ch1_temp
+    name: "NT18B07 CH1 Temperatur"
+    register_type: holding
+    address: 0x0000
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt18b07
+    id: nt18b07_ch2_temp
+    name: "NT18B07 CH2 Temperatur"
+    register_type: holding
+    address: 0x0001
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - lambda: |-
+          if ((int16_t)x == 0x7FFF || (int16_t)x == 0x8000) {
+            ESP_LOGW("modbus","[NT CH2] error raw=0x%04X", (int)x);
+            return NAN;
+          }
+          float v = x * 0.1f;
+          const float MIN = -40.0f, MAX = 120.0f;
+          if (!isfinite(v) || v < MIN || v > MAX) {
+            ESP_LOGW("modbus","[NT CH2] out of range %.2f", v);
+            return NAN;
+          }
+          return v;
+      - exponential_moving_average:
+          alpha: 0.3
+          send_every: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt18b07
+    id: nt18b07_ch3_temp
+    name: "NT18B07 CH3 Temperatur"
+    register_type: holding
+    address: 0x0002
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - lambda: |-
+          if ((int16_t)x == 0x7FFF || (int16_t)x == 0x8000) {
+            ESP_LOGW("modbus","[NT CH3] error raw=0x%04X", (int)x);
+            return NAN;
+          }
+          float v = x * 0.1f;
+          const float MIN = -40.0f, MAX = 120.0f;
+          if (!isfinite(v) || v < MIN || v > MAX) {
+            ESP_LOGW("modbus","[NT CH3] out of range %.2f", v);
+            return NAN;
+          }
+          return v;
+      - exponential_moving_average:
+          alpha: 0.3
+          send_every: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt18b07
+    id: nt18b07_ch4_temp
+    name: "NT18B07 CH4 Temperatur"
+    register_type: holding
+    address: 0x0003
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt18b07
+    id: nt18b07_ch5_temp
+    name: "NT18B07 CH5 Temperatur"
+    register_type: holding
+    address: 0x0004
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt18b07
+    id: nt18b07_ch6_temp
+    name: "NT18B07 CH6 Temperatur"
+    register_type: holding
+    address: 0x0005
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt18b07
+    id: nt18b07_ch7_temp
+    name: "NT18B07 CH7 Temperatur"
+    register_type: holding
+    address: 0x0006
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+    filters:
+      - multiply: 0.1
+      
   # TUF2000M Flow Rate Sensor (Modbus RTU via separate RS485 UART)
   - platform: modbus_controller
     modbus_controller_id: tuf2000m   # <- dein ID-Name
-    name: "TUF Flow Rate"
-    id: tuf_flow_rate
+    name: "TUF2000M Flow Rate"
+    id: tuf2000m_flow_rate
     register_type: holding
     address: 0x0001
     value_type: FP32
@@ -1709,77 +1919,152 @@ sensor:
     state_class: measurement
     accuracy_decimals: 3
 
-  - platform: integration
-    name: "TUF Volume Total"
-    id: tuf_volume_total
-    sensor: tuf_flow_rate     # m³/h -> m³
-    time_unit: h
-    unit_of_measurement: "m³"
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b   # <- dein ID-Name
+    name: "TUF2000B Flow Rate"
+    id: tuf2000b_flow_rate
+    register_type: holding
+    address: 0x1  # Register 1
+    register_count: 2
+    value_type: FP32
+    device_class: "volume_flow_rate"
+    state_class: "measurement"
+    unit_of_measurement: "m³/h"
     accuracy_decimals: 3
-    restore: true
-    device_class: water
-    state_class: total_increasing   # <-- REQUIRED for long-term stats
-  
-  # 1) raw words
-  - platform: modbus_controller
-    modbus_controller_id: tuf2000m
-    id: tuf_ss_w7
-    name: "TUF SS reg7 raw"
-    register_type: holding
-    address: 7
-    value_type: U_WORD
-    internal: true
 
   - platform: modbus_controller
     modbus_controller_id: tuf2000m
-    id: tuf_ss_w8
-    name: "TUF SS reg8 raw"
+    name: "TUF2000M Velocity"
+    id: tuf2000m_velocity
     register_type: holding
-    address: 8
-    value_type: U_WORD
-    internal: true
-
-  # 2) variant A: reg7 / 10.0  (what we used)
-  - platform: template
-    name: "TUF SS vA (/10)"
+    address: 0x3  # Register 3
+    register_count: 2
+    value_type: FP32
+    device_class: "speed"
+    state_class: "measurement"
     unit_of_measurement: "m/s"
-    accuracy_decimals: 1
-    lambda: |-
-      if (!id(tuf_ss_w7).has_state()) return NAN;
-      return id(tuf_ss_w7).state / 10.0f;
+    accuracy_decimals: 3 
 
-  # 3) variant B: reg7 as-is
-  - platform: template
-    name: "TUF SS vB (raw)"
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b
+    name: "TUF2000B Velocity"
+    id: tuf2000b_velocity
+    register_type: holding
+    address: 0x3  # Register 3
+    register_count: 2
+    value_type: FP32
+    device_class: "speed"
+    state_class: "measurement"
     unit_of_measurement: "m/s"
-    accuracy_decimals: 1
-    lambda: |-
-      if (!id(tuf_ss_w7).has_state()) return NAN;
-      return id(tuf_ss_w7).state;
+    accuracy_decimals: 3
 
-  # 4) variant C: 7+8 as normal float
-  - platform: template
-    name: "TUF SS vC (float normal)"
-    unit_of_measurement: "m/s"
+# T1 Inlet Temperature
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000m
+    name: "TUF2000M T1 Inlet"
+    id: tuf2000m_t1_inlet
+    register_type: holding
+    address: 0x21  # Register 33
+    register_count: 2
+    value_type: FP32
+    device_class: "temperature"
+    state_class: "measurement"
+    unit_of_measurement: "°C"
     accuracy_decimals: 1
-    lambda: |-
-      if (!id(tuf_ss_w7).has_state() || !id(tuf_ss_w8).has_state()) return NAN;
-      uint32_t raw = ((uint32_t)id(tuf_ss_w7).state << 16) | (uint32_t)id(tuf_ss_w8).state;
-      float f;
-      memcpy(&f, &raw, sizeof(f));
-      return f;
 
-  # 5) variant D: 7+8 as swapped float
-  - platform: template
-    name: "TUF SS vD (float swapped)"
-    unit_of_measurement: "m/s"
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b
+    name: "TUF2000B T1 Inlet"
+    id: tuf2000b_t1_inlet
+    register_type: holding
+    address: 0x21  # Register 33
+    register_count: 2
+    value_type: FP32
+    device_class: "temperature"
+    state_class: "measurement"
+    unit_of_measurement: "°C"
     accuracy_decimals: 1
+
+  # T2 Outlet Temperature
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000m
+    name: "TUF2000M T2 Outlet"
+    id: tuf2000m_t2_outlet
+    register_type: holding
+    address: 0x23  # Register 35
+    register_count: 2
+    value_type: FP32
+    device_class: "temperature"
+    state_class: "measurement"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b
+    name: "TUF2000B T2 Outlet"
+    id: tuf2000b_t2_outlet
+    register_type: holding
+    address: 0x23  # Register 35
+    register_count: 2
+    value_type: FP32
+    device_class: "temperature"
+    state_class: "measurement"
+    unit_of_measurement: "°C"
+    accuracy_decimals: 1
+
+# ==================== ENERGY SENSOREN ====================
+
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b
+    name: "TUF Net Energy GJ"
+    id: tuf_net_energy_gj
+    register_type: holding
+    address: 0x77          # 0x77 = 119 dez; Register 0119–0120
+    register_count: 2
+    response_size: 2
+    value_type: FP32       # 32-bit Float
+    unit_of_measurement: "GJ"
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b
+    name: "TUF Energy Flow Rate GJ/h"
+    id: tuf_power_gjh
+    register_type: holding
+    address: 3         # Register 0003–0004, 0-basiert
+    register_count: 2
+    response_size: 2
+    value_type: FP32
+    unit_of_measurement: "GJ/h"
+    state_class: measurement
+    accuracy_decimals: 4
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b
+    name: "TUF Power"
+    id: tuf_power_kw
+    register_type: holding
+    address: 3           # Energy Flow Rate
+    register_count: 2
+    response_size: 2
+    value_type: FP32
+    unit_of_measurement: "kW"
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - multiply: 277.7778
+
+  - platform: modbus_controller
+    modbus_controller_id: tuf2000b
+    name: "TUF2000B Flow Meter Signal Quality"
+    register_type: holding
+    address: 0x5C  # Register 92
+    register_count: 1
+    value_type: U_WORD 
     lambda: |-
-      if (!id(tuf_ss_w7).has_state() || !id(tuf_ss_w8).has_state()) return NAN;
-      uint32_t raw = ((uint32_t)id(tuf_ss_w8).state << 16) | (uint32_t)id(tuf_ss_w7).state;
-      float f;
-      memcpy(&f, &raw, sizeof(f));
-      return f;
+      return (uint16_t)(x) & 0xff;
+    state_class: "measurement"
+    unit_of_measurement: "%"
 
   - platform: template
     id: curve_vl_target

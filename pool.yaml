@@ -6,7 +6,8 @@ mqtt:
   port: 1883
   username: mqttbroker           # ggf. anpassen/entfernen
   password: mqttbroker           # ggf. anpassen/entfernen
-  discovery: false     
+  discovery: false   
+  reboot_timeout: 0s  
 
 #switch:
 #  - platform: template
