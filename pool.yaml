@@ -2,54 +2,76 @@ substitutions:
   pool_prefix: "pool_"
 
 mqtt:
-  broker: 192.168.1.128   # <-- anpassen auf deinen Broker
+  broker: 192.168.1.128
   port: 1883
-  username: mqttbroker           # ggf. anpassen/entfernen
-  password: mqttbroker           # ggf. anpassen/entfernen
-  discovery: false   
-  reboot_timeout: 0s  
+  username: mqttbroker
+  password: mqttbroker
+  discovery: false
+  reboot_timeout: 0s
 
-#switch:
-#  - platform: template
-#    name: "${pool_prefix}auto"
-#    id: pool_auto
-#    optimistic: true
-#    restore_mode: RESTORE_DEFAULT_ON
-
-# später:
-# sensor:
-#   - platform: modbus_controller  # pH
-#   - platform: modbus_controller  # ORP
-# switch:
-#   - platform: gpio  # Filterpumpe
-# script:
-#   - id: pool_regel
+time:
+  - platform: homeassistant
+    id: ha_time
 
 # -------------------------
-# Globals: Dosier-Sperrzeiten (Millis seit Start)
+# Globals
 # -------------------------
 globals:
-  - id: last_chlor_dose
+  # reboot-sichere Mindestpausen (epoch seconds)
+  - id: last_chlor_dose_ts
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+
+  - id: last_ph_dose_ts
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+
+  # "expire_after" Ersatz für Text-Sensoren (millis)
+  - id: last_cal_status_ms
     type: uint32_t
     restore_value: no
     initial_value: '0'
 
-  - id: last_ph_dose
+  - id: last_shelly_sw1_ms
     type: uint32_t
     restore_value: no
     initial_value: '0'
 
 # -------------------------
-# Sensoren vom Arduino UNO (MQTT)
+# Globals: letzte gesetzte DAC-Spannung (für Restore)
+# -------------------------
+  - id: pool_last_dac_v
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+# -------------------------
+# Sensoren
 # -------------------------
 sensor:
-  # pH-Wert vom UNO
+  # --- TUF2000M Flow Rate (nur wenn nicht schon im Heizungsteil vorhanden!) ---
+  # - platform: modbus_controller
+  #   modbus_controller_id: tuf2000m
+  #   name: "TUF2000M Flow Rate"
+  #   id: tuf2000m_flow_rate
+  #   register_type: holding
+  #   address: 0x0001
+  #   value_type: FP32
+  #   unit_of_measurement: "m³/h"
+  #   device_class: volume_flow_rate
+  #   state_class: measurement
+  #   accuracy_decimals: 3
+
+  # --- UNO MQTT Sensoren ---
   - platform: mqtt_subscribe
     id: ph_sensor
     name: "Pool pH (UNO)"
     topic: sensor/ph
     unit_of_measurement: "pH"
+    state_class: measurement
     accuracy_decimals: 2
+    expire_after: 10min
     filters:
       - clamp:
           min_value: 5.5
@@ -59,13 +81,14 @@ sensor:
           send_every: 1
           send_first_at: 1
 
-  # ORP-Wert vom UNO
   - platform: mqtt_subscribe
     id: orp_sensor
     name: "Pool ORP (UNO)"
     topic: sensor/orp
     unit_of_measurement: "mV"
+    state_class: measurement
     accuracy_decimals: 0
+    expire_after: 10min
     filters:
       - clamp:
           min_value: 400.0
@@ -75,7 +98,6 @@ sensor:
           send_every: 1
           send_first_at: 1
 
-  # Temperatur (RTD) vom UNO
   - platform: mqtt_subscribe
     id: temp_sensor
     name: "Pool Temperatur (UNO)"
@@ -84,6 +106,7 @@ sensor:
     device_class: temperature
     state_class: measurement
     accuracy_decimals: 1
+    expire_after: 10min
     filters:
       - clamp:
           min_value: 0.0
@@ -93,37 +116,120 @@ sensor:
           send_every: 1
           send_first_at: 1
 
-  # Optional: Analogkanäle vom UNO
   - platform: mqtt_subscribe
     id: a0_sensor
     name: "Pool A0 (UNO)"
     topic: sensor/a0
     accuracy_decimals: 2
+    expire_after: 10min
 
   - platform: mqtt_subscribe
     id: a1_sensor
     name: "Pool A1 (UNO)"
     topic: sensor/a1
     accuracy_decimals: 2
+    expire_after: 10min
+
+  # --- “Age” Sensoren für Text-Sensoren (Expire-Ersatz) ---
+  - platform: template
+    name: "Pool Kalibrierstatus Age (s)"
+    id: cal_status_age_s
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      if (id(last_cal_status_ms) == 0) return NAN;
+      return (millis() - id(last_cal_status_ms)) / 1000.0f;
+
+  - platform: template
+    name: "Shelly Switch1 Status Age (s)"
+    id: shelly_sw1_age_s
+    update_interval: 10s
+    accuracy_decimals: 0
+    lambda: |-
+      if (id(last_shelly_sw1_ms) == 0) return NAN;
+      return (millis() - id(last_shelly_sw1_ms)) / 1000.0f;
+
+  # -------------------------
+  # DAC Status via MQTT (Ist-Spannung)
+  # -------------------------
+  - platform: mqtt_subscribe
+    id: pool_dac_voltage_status
+    name: "Pool DAC Voltage (Status)"
+    topic: "pool/dac/state"
+    unit_of_measurement: "V"
+    state_class: measurement
+    accuracy_decimals: 2
+    expire_after: 10min
+    filters:
+      - clamp:
+          min_value: 0.0
+          max_value: 10.0
 
 # -------------------------
-# Text-Sensoren (UNO-Status, Shelly-Status)
+# Optional: Soll-Spannung als Sensor (nur Anzeige)
+# -------------------------
+  - platform: template
+    name: "Pool DAC Voltage (Soll)"
+    id: pool_dac_voltage_setpoint
+    unit_of_measurement: "V"
+    accuracy_decimals: 2
+    update_interval: 5s
+    lambda: |-
+      return id(pool_last_dac_v);
+
+# -------------------------
+# Text-Sensoren (OHNE expire_after)
 # -------------------------
 text_sensor:
-  # Kalibrierstatus vom UNO
   - platform: mqtt_subscribe
     id: cal_status
     name: "Pool Kalibrierstatus"
     topic: sensor/cal
+    on_value:
+      then:
+        - lambda: |-
+            id(last_cal_status_ms) = millis();
 
-  # Status des Shelly-Relais 1 (GEN2-Status-Topic)
   - platform: mqtt_subscribe
     id: chlor_pumpe_status_raw
     name: "Chlor Pumpe Status (Shelly Raw)"
     topic: "shellypro2-ec626091d068/status/switch:1"
+    on_value:
+      then:
+        - lambda: |-
+            id(last_shelly_sw1_ms) = millis();
+
+# Fresh-Flags (expire_after Ersatz)
+binary_sensor:
+  - platform: template
+    id: cal_status_fresh
+    name: "Pool Kalibrierstatus Fresh"
+    lambda: |-
+      if (id(last_cal_status_ms) == 0) return false;
+      return (millis() - id(last_cal_status_ms)) < (30UL * 60UL * 1000UL); // 30min
+
+  - platform: template
+    id: shelly_sw1_fresh
+    name: "Shelly Switch1 Status Fresh"
+    lambda: |-
+      if (id(last_shelly_sw1_ms) == 0) return false;
+      return (millis() - id(last_shelly_sw1_ms)) < (30UL * 60UL * 1000UL); // 30min
+
+  # Flow OK (stabil + entprellt)
+  - platform: template
+    id: pool_flow_ok
+    name: "Pool Flow OK"
+    lambda: |-
+      const float f = id(tuf2000m_flow_rate).state;
+      if (!std::isfinite(f)) return false;
+      const float flow = fabsf(f);
+      return flow >= id(pool_min_flow_num).state;
+    filters:
+      - delayed_on: 10s
+      - delayed_off: 30s
 
 # -------------------------
-# Einstellbare Parameter (in HA sichtbar)
+# Einstellbare Parameter (HA)
 # -------------------------
 number:
   - platform: template
@@ -180,18 +286,57 @@ number:
     optimistic: true
     initial_value: 20
 
+  - platform: template
+    id: min_pause_min_num
+    name: "Mindestpause Dosierung (min)"
+    min_value: 1
+    max_value: 60
+    step: 1
+    optimistic: true
+    initial_value: 5
+
+  - platform: template
+    id: pool_min_flow_num
+    name: "Pool Mindest-Durchfluss (m³/h)"
+    min_value: 0.1
+    max_value: 20.0
+    step: 0.1
+    optimistic: true
+    initial_value: 2.0
+
+  - platform: template
+    id: filter_pumpe_speed_pct
+    name: "Filterpumpe Speed (%)"
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 50
+    set_action:
+      # Nur aktiv setzen, wenn Enable=ON; sonst nur merken und beim Einschalten anwenden
+      - if:
+          condition:
+            switch.is_on: filter_pumpe_enable_dac
+          then:
+            - script.execute:
+                id: pool_set_dac_voltage
+                v: !lambda |-
+                  float pct = x;
+                  if (!std::isfinite(pct) || pct <= 0.0f) return 0.0f;
+                  if (pct > 100.0f) pct = 100.0f;
+                  return 2.0f + (pct / 100.0f) * (9.5f - 2.0f);
+
 # -------------------------
-# Schalter (Shelly-Pumpen + Automatik)
+# Schalter (Shelly + Enable)
 # -------------------------
 switch:
-  # Master-Schalter für die automatische Dosierung
   - platform: template
     id: dosierung_enable
     name: "Pooldosierung aktiv"
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF
 
-  # Chlorpumpe: Shelly Pro 2, Switch 1
   - platform: template
     id: chlor_pumpe
     name: "Chlor Pumpe (Shelly Pro 2 Relay 1)"
@@ -210,8 +355,31 @@ switch:
           qos: 1
           retain: false
       - logger.log: "Shelly Pro 2 Relay 1 -> OFF via MQTT"
+  
+  # -------------------------
+  # Filterpumpe Enable + Speed (% -> Volt)
+  # -------------------------
+  - platform: template
+    id: filter_pumpe_enable_dac
+    name: "Filterpumpe Enable (DAC)"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      # Bei EIN: setze auf den aktuellen Sollwert (number) -> Volt
+      - script.execute:
+          id: pool_set_dac_voltage
+          v: !lambda |-
+            // Map: 0% => 0.0V (AUS), >0% => 2.0..9.5V
+            float pct = id(filter_pumpe_speed_pct).state;
+            if (!std::isfinite(pct) || pct <= 0.0f) return 0.0f;
+            if (pct > 100.0f) pct = 100.0f;
+            return 2.0f + (pct / 100.0f) * (9.5f - 2.0f);
+    turn_off_action:
+      # Bei AUS: DAC auf 0.0V
+      - script.execute:
+          id: pool_set_dac_voltage
+          v: 0.0
 
-  # pH-Minus-Pumpe: Shelly Pro 2, Switch 0 (optional)
   - platform: template
     id: ph_minus_pumpe
     name: "pH-Minus Pumpe (Shelly Pro 2 Relay 0)"
@@ -232,32 +400,105 @@ switch:
       - logger.log: "Shelly Pro 2 Relay 0 -> OFF via MQTT"
 
 # -------------------------
-# Scripts für Dosier-Stöße
+# Scripts: Dosier-Stöße mit HARD-SAFETY
+# - Start nur bei Flow OK + Enable + Interlock
+# - Während Dosierung: Flow fällt weg => sofort AUS + stop
 # -------------------------
 script:
   - id: chlor_dosierung
-    mode: restart
+    mode: single
     then:
       - if:
           condition:
             lambda: |-
-              return id(dosierung_enable).state && !id(chlor_pumpe).state;
+              return id(dosierung_enable).state
+                     && id(pool_flow_ok).state
+                     && !id(chlor_pumpe).state
+                     && !id(ph_minus_pumpe).state;
           then:
+            - logger.log:
+                format: "POOL: Starte Chlor-Dosierung (Flow=%.3f m³/h)"
+                args: ['id(tuf2000m_flow_rate).state']
             - switch.turn_on: chlor_pumpe
-            - delay: !lambda "return (uint32_t)(id(chlor_dosier_dauer_num).state * 1000.0f);"
+
+            - repeat:
+                count: !lambda "return (uint32_t)(id(chlor_dosier_dauer_num).state * 4.0f);"
+                then:
+                  - if:
+                      condition:
+                        lambda: |-
+                          return !id(pool_flow_ok).state;
+                      then:
+                        - logger.log:
+                            level: WARN
+                            format: "POOL: Flow weg/zu klein (%.3f m³/h) -> Chlor SOFORT AUS"
+                            args: ['id(tuf2000m_flow_rate).state']
+                        - switch.turn_off: chlor_pumpe
+                        - script.stop: chlor_dosierung
+                  - delay: 250ms
+
             - switch.turn_off: chlor_pumpe
+            - logger.log: "POOL: Chlor-Dosierung beendet"
 
   - id: ph_minus_dosierung
-    mode: restart
+    mode: single
     then:
       - if:
           condition:
             lambda: |-
-              return id(dosierung_enable).state && !id(ph_minus_pumpe).state;
+              return id(dosierung_enable).state
+                     && id(pool_flow_ok).state
+                     && !id(ph_minus_pumpe).state
+                     && !id(chlor_pumpe).state;
           then:
+            - logger.log:
+                format: "POOL: Starte pH-Minus-Dosierung (Flow=%.3f m³/h)"
+                args: ['id(tuf2000m_flow_rate).state']
             - switch.turn_on: ph_minus_pumpe
-            - delay: !lambda "return (uint32_t)(id(ph_dosier_dauer_num).state * 1000.0f);"
+
+            - repeat:
+                count: !lambda "return (uint32_t)(id(ph_dosier_dauer_num).state * 4.0f);"
+                then:
+                  - if:
+                      condition:
+                        lambda: |-
+                          return !id(pool_flow_ok).state;
+                      then:
+                        - logger.log:
+                            level: WARN
+                            format: "POOL: Flow weg/zu klein (%.3f m³/h) -> pH-Minus SOFORT AUS"
+                            args: ['id(tuf2000m_flow_rate).state']
+                        - switch.turn_off: ph_minus_pumpe
+                        - script.stop: ph_minus_dosierung
+                  - delay: 250ms
+
             - switch.turn_off: ph_minus_pumpe
+            - logger.log: "POOL: pH-Minus-Dosierung beendet"
+
+  # -------------------------
+  # Script: DAC Voltage setzen (0..10V)
+  # -------------------------
+  - id: pool_set_dac_voltage
+    mode: restart
+    parameters:
+      v: float
+    then:
+      - lambda: |-
+          float vv = v;
+          if (!std::isfinite(vv)) vv = 0.0f;
+          if (vv < 0.0f) vv = 0.0f;
+          if (vv > 10.0f) vv = 10.0f;
+          id(pool_last_dac_v) = vv;
+      - mqtt.publish:
+          topic: "pool/dac/set"
+          qos: 1
+          retain: false
+          payload: !lambda |-
+            char buf[16];
+            // 2 Nachkommastellen reichen
+            snprintf(buf, sizeof(buf), "%.2f", id(pool_last_dac_v));
+            return std::string(buf);
+
 
 # -------------------------
 # Regel-Logik (pH & ORP)
@@ -271,6 +512,19 @@ interval:
             return;
           }
 
+          // Reboot-sichere Sperrzeiten nur mit gültiger Zeit
+          if (!id(ha_time).now().is_valid()) {
+            ESP_LOGW("POOL", "HA-Zeit nicht gültig -> keine Dosierung (Safety).");
+            return;
+          }
+
+          // Nur dosieren wenn Flow OK
+          if (!id(pool_flow_ok).state) {
+            ESP_LOGW("POOL", "Durchfluss zu gering (%.3f m³/h) -> keine Dosierung.",
+                     id(tuf2000m_flow_rate).state);
+            return;
+          }
+
           const float ph      = id(ph_sensor).state;
           const float ph_soll = id(ph_soll_num).state;
           const float ph_band = id(ph_band_num).state;
@@ -281,45 +535,40 @@ interval:
 
           const float temp = id(temp_sensor).state;
 
-          // Unter 10°C keine Dosierung
-          if (!isnan(temp) && temp < 10.0f) {
+          if (std::isfinite(temp) && temp < 10.0f) {
             ESP_LOGW("POOL", "Wassertemperatur = %.1f°C < 10°C, keine Dosierung.", temp);
             return;
           }
 
-          const uint32_t now = millis();
-          const uint32_t min_pause_ms = 300000UL;  // 5 Minuten Mindestabstand
+          const uint32_t now_ts = (uint32_t) id(ha_time).now().timestamp;
+          const uint32_t min_pause_s = (uint32_t) (id(min_pause_min_num).state * 60.0f);
 
-          // --- pH-Regelung ---
-          if (!isnan(ph) && !isnan(ph_soll) && !isnan(ph_band) && ph > 0.0f) {
-            ESP_LOGD("POOL", "pH=%.2f, Soll=%.2f, Band=%.2f", ph, ph_soll, ph_band);
-
+          // pH-Regelung (nur pH-Minus)
+          if (std::isfinite(ph) && std::isfinite(ph_soll) && std::isfinite(ph_band) && ph > 0.0f) {
             if (ph > ph_soll + ph_band) {
-              if (now - id(last_ph_dose) > min_pause_ms) {
-                ESP_LOGI("POOL", "pH=%.2f > Soll+Band (%.2f) -> pH-Minus dosieren", ph, ph_soll + ph_band);
-                id(last_ph_dose) = now;
+              if (now_ts - id(last_ph_dose_ts) > min_pause_s) {
+                ESP_LOGI("POOL", "pH=%.2f > %.2f -> pH-Minus dosieren", ph, ph_soll + ph_band);
+                id(last_ph_dose_ts) = now_ts;
                 id(ph_minus_dosierung).execute();
               } else {
-                ESP_LOGI("POOL", "pH zu hoch, aber Mindestpause pH-Dosierung noch nicht abgelaufen.");
+                ESP_LOGI("POOL", "pH hoch, aber Mindestpause noch nicht abgelaufen (%us).", min_pause_s);
               }
             }
           } else {
-            ESP_LOGW("POOL", "pH-Wert oder pH-Parameter ungueltig, keine pH-Regelung.");
+            ESP_LOGW("POOL", "pH-Wert/Parameter ungueltig/abgelaufen -> keine pH-Regelung.");
           }
 
-          // --- ORP-Regelung ---
-          if (!isnan(orp) && !isnan(orp_soll) && !isnan(orp_band) && orp > 0.0f) {
-            ESP_LOGD("POOL", "ORP=%.0f mV, Soll=%.0f, Band=%.0f", orp, orp_soll, orp_band);
-
+          // ORP-Regelung -> Chlor
+          if (std::isfinite(orp) && std::isfinite(orp_soll) && std::isfinite(orp_band) && orp > 0.0f) {
             if (orp < orp_soll - orp_band) {
-              if (now - id(last_chlor_dose) > min_pause_ms) {
-                ESP_LOGI("POOL", "ORP=%.0f < Soll-Band (%.0f) -> Chlor dosieren", orp, orp_soll - orp_band);
-                id(last_chlor_dose) = now;
+              if (now_ts - id(last_chlor_dose_ts) > min_pause_s) {
+                ESP_LOGI("POOL", "ORP=%.0f < %.0f -> Chlor dosieren", orp, orp_soll - orp_band);
+                id(last_chlor_dose_ts) = now_ts;
                 id(chlor_dosierung).execute();
               } else {
-                ESP_LOGI("POOL", "ORP zu niedrig, aber Mindestpause Chlor-Dosierung noch nicht abgelaufen.");
+                ESP_LOGI("POOL", "ORP niedrig, aber Mindestpause noch nicht abgelaufen (%us).", min_pause_s);
               }
             }
           } else {
-            ESP_LOGW("POOL", "ORP-Wert oder ORP-Parameter ungueltig, keine ORP-Regelung.");
+            ESP_LOGW("POOL", "ORP-Wert/Parameter ungueltig/abgelaufen -> keine ORP-Regelung.");
           }
