@@ -10,13 +10,13 @@ esphome:
     name: "kc868.a6-heizung"
     version: "${fw_version}"
   # Build-Optionen (optional, können gelöscht werden wenn störend)
-  platformio_options:
-    lib_deps:
-      - adafruit/Adafruit BusIO @ ^1.14.5
-    lib_ldf_mode: deep+
-    build_flags:
-      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Wire/src
-      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Network/src
+#  platformio_options:
+#    lib_deps:
+#      - adafruit/Adafruit BusIO @ ^1.14.5
+#    lib_ldf_mode: deep+
+#    build_flags:
+#      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Wire/src
+#      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Network/src
 
 
 esp32:
@@ -44,7 +44,23 @@ web_server:
 
 # Logger (Debug für Tests)
 logger:
-  level: DEBUG
+#  level: DEBUG
+  level: WARN
+  logs:
+    # Wichtig: diese Warnungen sehen
+    component: WARN
+    modbus_controller: WARN
+    modbus: WARN
+    wifi: WARN
+    mqtt: WARN
+
+    # Deine Spam-Infos weg:
+    sensor: ERROR
+
+    # Wenn MIXER_FAST/Brenner zu viel ist:
+    MIXER_FAST: ERROR
+    Brenner: ERROR
+
 
 # Home Assistant / API Verbindung
 api:
@@ -72,3 +88,20 @@ captive_portal:
 packages:
   heizung: !include heizung.yaml
   pool: !include pool.yaml
+
+debug:
+  update_interval: 10s
+
+text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset reason"
+sensor:
+  - platform: uptime
+    name: "A6 Uptime"
+
+  - platform: debug
+    free:
+      name: "A6 Heap Free"
+    loop_time:
+      name: "A6 Loop Time"

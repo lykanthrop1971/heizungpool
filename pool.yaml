@@ -46,6 +46,20 @@ globals:
     type: float
     restore_value: yes
     initial_value: '0.0'
+
+# Globals: Füllstand Chlor/pH-minus Tanks (Liter)
+  - id: chlor_tank_l
+    type: float
+    restore_value: yes
+    initial_value: '25.0'
+
+  - id: ph_tank_l
+    type: float
+    restore_value: yes
+    initial_value: '25.0'
+
+
+
 # -------------------------
 # Sensoren
 # -------------------------
@@ -177,6 +191,54 @@ sensor:
     lambda: |-
       return id(pool_last_dac_v);
 
+  # Restmenge Liter
+  - platform: template
+    id: chlor_tank_remaining_l
+    name: "Chlor Tank Rest (L)"
+    unit_of_measurement: "L"
+    accuracy_decimals: 2
+    update_interval: 10s
+    lambda: |-
+      return id(chlor_tank_l);
+
+  - platform: template
+    id: ph_tank_remaining_l
+    name: "pH-Minus Tank Rest (L)"
+    unit_of_measurement: "L"
+    accuracy_decimals: 2
+    update_interval: 10s
+    lambda: |-
+      return id(ph_tank_l);
+
+  # Prozent
+  - platform: template
+    id: chlor_tank_percent
+    name: "Chlor Tank (%)"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      const float cap = id(chlor_tank_capacity_l).state;
+      if (!std::isfinite(cap) || cap <= 0.0f) return NAN;
+      float pct = (id(chlor_tank_l) / cap) * 100.0f;
+      if (pct < 0.0f) pct = 0.0f;
+      if (pct > 100.0f) pct = 100.0f;
+      return pct;
+
+  - platform: template
+    id: ph_tank_percent
+    name: "pH-Minus Tank (%)"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: |-
+      const float cap = id(ph_tank_capacity_l).state;
+      if (!std::isfinite(cap) || cap <= 0.0f) return NAN;
+      float pct = (id(ph_tank_l) / cap) * 100.0f;
+      if (pct < 0.0f) pct = 0.0f;
+      if (pct > 100.0f) pct = 100.0f;
+      return pct;
+
 # -------------------------
 # Text-Sensoren (OHNE expire_after)
 # -------------------------
@@ -227,7 +289,49 @@ binary_sensor:
     filters:
       - delayed_on: 10s
       - delayed_off: 30s
+  # Low-Level kommt aus Home Assistant (Shelly Plus Uni)
+  - platform: homeassistant
+    id: chlor_low_level
+    name: "Chlor Tank Low Level (Shelly)"
+    entity_id: binary_sensor.shellyplusuni_d48afc7a1174_input_1
 
+  - platform: homeassistant
+    id: ph_low_level
+    name: "pH-Minus Tank Low Level (Shelly)"
+    entity_id: binary_sensor.shellyplusuni_d48afc7a1174_input_0
+
+  # Safety: leer wenn Low-Level ODER rechnerisch fast leer
+  - platform: template
+    id: chlor_tank_empty
+    name: "Chlor Tank leer (Safety)"
+    device_class: problem
+    lambda: |-
+      return id(chlor_low_level).state || (id(chlor_tank_l) <= 0.05f);
+
+  - platform: template
+    id: ph_tank_empty
+    name: "pH-Minus Tank leer (Safety)"
+    device_class: problem
+    lambda: |-
+      return id(ph_low_level).state || (id(ph_tank_l) <= 0.05f);
+
+  # Extra Airbag: sobald Low-Level -> sofort beide Dosierpumpen AUS + Scripts stoppen
+  - platform: template
+    id: any_tank_low
+    name: "Pool Tank Low (irgendeiner)"
+    device_class: problem
+    lambda: |-
+      return id(chlor_low_level).state || id(ph_low_level).state;
+    on_press:
+      then:
+        - logger.log:
+            level: WARN
+            format: >-
+              POOL: LOW LEVEL -> beide Dosierpumpen AUS / Stop Scripts
+        - switch.turn_off: chlor_pumpe
+        - switch.turn_off: ph_minus_pumpe
+        - script.stop: chlor_dosierung
+        - script.stop: ph_minus_dosierung
 # -------------------------
 # Einstellbare Parameter (HA)
 # -------------------------
@@ -327,6 +431,26 @@ number:
                   if (pct > 100.0f) pct = 100.0f;
                   return 2.0f + (pct / 100.0f) * (9.5f - 2.0f);
 
+  - platform: template
+    id: chlor_tank_capacity_l
+    name: "Chlor Tank Kapazität (L)"
+    min_value: 5
+    max_value: 60
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 25
+
+  - platform: template
+    id: ph_tank_capacity_l
+    name: "pH-Minus Tank Kapazität (L)"
+    min_value: 5
+    max_value: 60
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 25
+
 # -------------------------
 # Schalter (Shelly + Enable)
 # -------------------------
@@ -399,6 +523,24 @@ switch:
           retain: false
       - logger.log: "Shelly Pro 2 Relay 0 -> OFF via MQTT"
 
+
+button:
+  - platform: template
+    name: "Chlor Tank aufgefüllt"
+    on_press:
+      - lambda: |-
+          float cap = id(chlor_tank_capacity_l).state;
+          if (!std::isfinite(cap) || cap <= 0.0f) cap = 25.0f;
+          id(chlor_tank_l) = cap;
+
+  - platform: template
+    name: "pH-Minus Tank aufgefüllt"
+    on_press:
+      - lambda: |-
+          float cap = id(ph_tank_capacity_l).state;
+          if (!std::isfinite(cap) || cap <= 0.0f) cap = 25.0f;
+          id(ph_tank_l) = cap;
+
 # -------------------------
 # Scripts: Dosier-Stöße mit HARD-SAFETY
 # - Start nur bei Flow OK + Enable + Interlock
@@ -414,31 +556,53 @@ script:
               return id(dosierung_enable).state
                      && id(pool_flow_ok).state
                      && !id(chlor_pumpe).state
-                     && !id(ph_minus_pumpe).state;
+                     && !id(ph_minus_pumpe).state
+                     && !id(chlor_tank_empty).state;
           then:
             - logger.log:
-                format: "POOL: Starte Chlor-Dosierung (Flow=%.3f m³/h)"
-                args: ['id(tuf2000m_flow_rate).state']
+                format: >-
+                  POOL: Starte Chlor-Dosierung
             - switch.turn_on: chlor_pumpe
 
+            # 250ms Takt: Verbrauch abziehen + Hard-Safety prüfen
             - repeat:
                 count: !lambda "return (uint32_t)(id(chlor_dosier_dauer_num).state * 4.0f);"
                 then:
+                  - lambda: |-
+                      // 1.5 L/h = 1.5/3600 L/s
+                      const float L_PER_S = 1.5f / 3600.0f;
+                      const float dt = 0.25f; // 250ms
+                      id(chlor_tank_l) -= (L_PER_S * dt);
+                      if (!std::isfinite(id(chlor_tank_l)) || id(chlor_tank_l) < 0.0f) id(chlor_tank_l) = 0.0f;
+
                   - if:
                       condition:
                         lambda: |-
-                          return !id(pool_flow_ok).state;
+                          return (!id(pool_flow_ok).state)
+                              || id(chlor_low_level).state
+                              || (id(chlor_tank_l) <= 0.0f);
                       then:
                         - logger.log:
                             level: WARN
-                            format: "POOL: Flow weg/zu klein (%.3f m³/h) -> Chlor SOFORT AUS"
-                            args: ['id(tuf2000m_flow_rate).state']
+                            format: >-
+                              POOL: Chlor STOP (flow_ok=%d low=%d rest=%.2fL)
+                            args: ['(int)id(pool_flow_ok).state','(int)id(chlor_low_level).state','id(chlor_tank_l)']
                         - switch.turn_off: chlor_pumpe
                         - script.stop: chlor_dosierung
+
                   - delay: 250ms
 
             - switch.turn_off: chlor_pumpe
-            - logger.log: "POOL: Chlor-Dosierung beendet"
+            - logger.log:
+                format: >-
+                  POOL: Chlor-Dosierung beendet
+          else:
+            - logger.log:
+                level: WARN
+                format: >-
+                  POOL: Chlor-Dosierung BLOCKIERT (enable=%d flow_ok=%d empty=%d)
+                args: ['(int)id(dosierung_enable).state','(int)id(pool_flow_ok).state','(int)id(chlor_tank_empty).state']
+
 
   - id: ph_minus_dosierung
     mode: single
@@ -449,31 +613,50 @@ script:
               return id(dosierung_enable).state
                      && id(pool_flow_ok).state
                      && !id(ph_minus_pumpe).state
-                     && !id(chlor_pumpe).state;
+                     && !id(chlor_pumpe).state
+                     && !id(ph_tank_empty).state;
           then:
             - logger.log:
-                format: "POOL: Starte pH-Minus-Dosierung (Flow=%.3f m³/h)"
-                args: ['id(tuf2000m_flow_rate).state']
+                format: >-
+                  POOL: Starte pH-Minus-Dosierung
             - switch.turn_on: ph_minus_pumpe
 
             - repeat:
                 count: !lambda "return (uint32_t)(id(ph_dosier_dauer_num).state * 4.0f);"
                 then:
+                  - lambda: |-
+                      const float L_PER_S = 1.5f / 3600.0f;
+                      const float dt = 0.25f;
+                      id(ph_tank_l) -= (L_PER_S * dt);
+                      if (!std::isfinite(id(ph_tank_l)) || id(ph_tank_l) < 0.0f) id(ph_tank_l) = 0.0f;
+
                   - if:
                       condition:
                         lambda: |-
-                          return !id(pool_flow_ok).state;
+                          return (!id(pool_flow_ok).state)
+                              || id(ph_low_level).state
+                              || (id(ph_tank_l) <= 0.0f);
                       then:
                         - logger.log:
                             level: WARN
-                            format: "POOL: Flow weg/zu klein (%.3f m³/h) -> pH-Minus SOFORT AUS"
-                            args: ['id(tuf2000m_flow_rate).state']
+                            format: >-
+                              POOL: pH-Minus STOP (flow_ok=%d low=%d rest=%.2fL)
+                            args: ['(int)id(pool_flow_ok).state','(int)id(ph_low_level).state','id(ph_tank_l)']
                         - switch.turn_off: ph_minus_pumpe
                         - script.stop: ph_minus_dosierung
+
                   - delay: 250ms
 
             - switch.turn_off: ph_minus_pumpe
-            - logger.log: "POOL: pH-Minus-Dosierung beendet"
+            - logger.log:
+                format: >-
+                  POOL: pH-Minus-Dosierung beendet
+          else:
+            - logger.log:
+                level: WARN
+                format: >-
+                  POOL: pH-Minus BLOCKIERT (enable=%d flow_ok=%d empty=%d)
+                args: ['(int)id(dosierung_enable).state','(int)id(pool_flow_ok).state','(int)id(ph_tank_empty).state']
 
   # -------------------------
   # Script: DAC Voltage setzen (0..10V)

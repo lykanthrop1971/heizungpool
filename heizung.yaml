@@ -139,45 +139,66 @@ uart:
 modbus:
   id: modbus_bus
   uart_id: uart_rs485
-  send_wait_time: 500ms
+  send_wait_time: 300ms
 
 modbus_controller:
+  # --- Main / fast controller (keep stable, reduce retry-storms) ---
   - id: mb_ctrl
     address: 1
     modbus_id: modbus_bus
     setup_priority: -10
-    update_interval: 5s
-    command_throttle: 400ms
+    update_interval: 11s
+    command_throttle: 600ms
+    max_cmd_retries: 0
+    offline_skip_updates: 30
+
+  # --- TUF2000: can block hard when it misses replies -> do not retry, skip longer when offline ---
   - id: tuf2000m
     address: 2
     modbus_id: modbus_bus
-    update_interval: 15s
-    command_throttle: 400ms
-    max_cmd_retries: 1
-    offline_skip_updates: 10    
+    update_interval: 17s
+    command_throttle: 800ms
+    max_cmd_retries: 0
+    offline_skip_updates: 60
+
   - id: tuf2000b
     address: 3
     modbus_id: modbus_bus
-    update_interval: 15s
-    command_throttle: 400ms
-    max_cmd_retries: 1
-    offline_skip_updates: 10
-  - id: pta8c04
-    address: 101          # RS485-Adresse des PTA8C04
-    modbus_id: modbus_bus  
-    setup_priority: -10
-    update_interval: 10s
-    command_throttle: 400ms
-    max_cmd_retries: 1
-    offline_skip_updates: 10
+    update_interval: 13s
+    command_throttle: 800ms
+    max_cmd_retries: 0
+    offline_skip_updates: 60
+
+  # --- PTA8C04: moderate pace, limited retries ---
+  # - id: pta8c04
+  #   address: 101          # RS485-Adresse des PTA8C04
+  #   modbus_id: modbus_bus
+  #   setup_priority: -10
+  #   update_interval: 15s
+  #   command_throttle: 600ms
+  #   max_cmd_retries: 0
+  #   offline_skip_updates: 30
+
+  # --- NT18B07: your fast temperature source; keep it quick but avoid retry bursts ---
   - id: nt18b07
     address: 100          # RS485-Adresse des NT18B07
     modbus_id: modbus_bus
     setup_priority: -10
     update_interval: 3s
-    command_throttle: 200ms
-    max_cmd_retries: 1
-    offline_skip_updates: 10
+    command_throttle: 250ms
+    max_cmd_retries: 0
+    offline_skip_updates: 20
+
+  # --- NT48A08: slower scan, limited retries ---
+  # - id: nt48a08
+  #   address: 32               # RS485 Slave-ID des NT48A08
+  #   modbus_id: modbus_bus
+  #   setup_priority: -10
+  #   update_interval: 15s
+  #   command_throttle: 600ms
+  #   max_cmd_retries: 0
+  #   offline_skip_updates: 30
+ 
 
 gp8403:
   id: my_gp8403
@@ -394,14 +415,6 @@ globals:
     type: uint32_t
     restore_value: false
     initial_value: '0'
-  # - id: burner_was_on
-  #   type: bool
-  #   restore_value: false
-  #   initial_value: 'false'
-  # - id: burner_boost_until_ms
-  #   type: uint32_t
-  #   restore_value: false
-  #   initial_value: '0'
   - id: mixer_trim
     type: float
     restore_value: true
@@ -561,6 +574,15 @@ globals:
     initial_value: '70.0'    # bisheriger Hardcode-Wert
     restore_value: true      # Wert über Neustarts behalten
 
+  - id: pool_override
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+  - id: heizmodus_before_pool
+    type: std::string
+    restore_value: yes
+    initial_value: '"auto"'
+
 select:
   - platform: template
     name: "Heizmodus"
@@ -570,6 +592,20 @@ select:
     options: ["auto","summer","winter","pool"]
     on_value:
       then:
+        - lambda: |-
+            const std::string v = id(heizmodus_select).state;
+
+            // Basis-Modus merken (nur auto/summer/winter)
+            if (v == "auto" || v == "summer" || v == "winter") {
+              id(heizmodus_before_pool) = v;
+              id(pool_override) = false;   // wenn User bewusst Basis wählt -> Pool-Override aus
+            } else if (v == "pool") {
+              id(pool_override) = true;    // "pool" im Select bedeutet Override aktiv
+            } else {
+              // Fallback
+              id(heizmodus_before_pool) = "auto";
+              id(pool_override) = false;
+            }
         - script.execute: saison_update_logic
 
 # Individual outputs
@@ -717,6 +753,44 @@ switch:
     id: mixer_pause_on_burner
     optimistic: true
     restore_mode: RESTORE_DEFAULT_OFF   # AUS = Regler bleibt aktiv, wenn Brenner läuft
+
+  - platform: template
+    name: "Poolmodus (Override)"
+    id: poolmodus_override
+    icon: mdi:pool
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+    lambda: |-
+      return id(pool_override);
+
+    turn_on_action:
+      - lambda: |-
+          // aktuellen Basis-Modus merken (falls nicht sowieso schon pool)
+          std::string sel = id(heizmodus_select).state;
+          if (sel != "pool" && (sel == "auto" || sel == "summer" || sel == "winter")) {
+            id(heizmodus_before_pool) = sel;
+          }
+          id(pool_override) = true;
+
+          // UI konsistent: Select auf pool setzen
+          if (id(heizmodus_select).state != "pool") {
+            id(heizmodus_select).publish_state("pool");
+          }
+      - script.execute: saison_update_logic
+
+    turn_off_action:
+      - lambda: |-
+          id(pool_override) = false;
+
+          // zurück zum gemerkten Basis-Modus
+          std::string back = id(heizmodus_before_pool);
+          if (back != "auto" && back != "summer" && back != "winter") back = "auto";
+
+          if (id(heizmodus_select).state != back) {
+            id(heizmodus_select).publish_state(back);
+          }
+      - script.execute: saison_update_logic
 
 binary_sensor:
   - platform: gpio
@@ -899,6 +973,10 @@ script:
     mode: restart
     then:
       - lambda: |-
+          if (id(pool_override)) {
+            id(heizmodus) = "pool";
+            return;
+          }
           // --- 1) Auto-Winter/Sommer anhand Außentemperatur & Hysterese
           float t = id(outdoor).state;
           if (std::isfinite(t)) {
@@ -1042,14 +1120,6 @@ button:
 
             ESP_LOGI("Reset", "Analog-only reset done.");
         - button.press: restart_button
-
-# One-shot button to clear the lock/password (writes 0 to both regs)
-  - platform: template
-    name: "TUF Password Reset"
-    on_press:
-      - number.set: { id: tuf_lock_reg_49, value: 0 }
-      - delay: 1000ms
-      - number.set: { id: tuf_lock_reg_50, value: 0 }
 
 sensor:
   - platform: wifi_signal
@@ -1660,53 +1730,53 @@ sensor:
 
 
   # PTA8C04 – PT100 Temperaturen, je 0.1 °C, signed 16 bit
-  - platform: modbus_controller
-    modbus_controller_id: pta8c04
-    id: pta8c04_ch0_temp
-    name: "PT100 CH0 Temperatur"
-    address: 0x0000
-    register_type: holding
-    value_type: S_WORD
-    unit_of_measurement: "°C"
-    accuracy_decimals: 1
-    filters:
-      - multiply: 0.1
+  # - platform: modbus_controller
+  #   modbus_controller_id: pta8c04
+  #   id: pta8c04_ch0_temp
+  #   name: "PT100 CH0 Temperatur"
+  #   address: 0x0000
+  #   register_type: holding
+  #   value_type: S_WORD
+  #   unit_of_measurement: "°C"
+  #   accuracy_decimals: 1
+  #   filters:
+  #     - multiply: 0.1
 
-  - platform: modbus_controller
-    modbus_controller_id: pta8c04
-    id: pta8c04_ch1_temp
-    name: "PT100 CH1 Temperatur"
-    address: 0x0001
-    register_type: holding
-    value_type: S_WORD
-    unit_of_measurement: "°C"
-    accuracy_decimals: 1
-    filters:
-      - multiply: 0.1
+  # - platform: modbus_controller
+  #   modbus_controller_id: pta8c04
+  #   id: pta8c04_ch1_temp
+  #   name: "PT100 CH1 Temperatur"
+  #   address: 0x0001
+  #   register_type: holding
+  #   value_type: S_WORD
+  #   unit_of_measurement: "°C"
+  #   accuracy_decimals: 1
+  #   filters:
+  #     - multiply: 0.1
 
-  - platform: modbus_controller
-    modbus_controller_id: pta8c04
-    id: pta8c04_ch2_temp
-    name: "PT100 CH2 Temperatur"
-    address: 0x0002
-    register_type: holding
-    value_type: S_WORD
-    unit_of_measurement: "°C"
-    accuracy_decimals: 1
-    filters:
-      - multiply: 0.1
+  # - platform: modbus_controller
+  #   modbus_controller_id: pta8c04
+  #   id: pta8c04_ch2_temp
+  #   name: "PT100 CH2 Temperatur"
+  #   address: 0x0002
+  #   register_type: holding
+  #   value_type: S_WORD
+  #   unit_of_measurement: "°C"
+  #   accuracy_decimals: 1
+  #   filters:
+  #     - multiply: 0.1
 
-  - platform: modbus_controller
-    modbus_controller_id: pta8c04
-    id: pta8c04_ch3_temp
-    name: "PT100 CH3 Temperatur"
-    address: 0x0003
-    register_type: holding
-    value_type: S_WORD
-    unit_of_measurement: "°C"
-    accuracy_decimals: 1
-    filters:
-      - multiply: 0.1
+  # - platform: modbus_controller
+  #   modbus_controller_id: pta8c04
+  #   id: pta8c04_ch3_temp
+  #   name: "PT100 CH3 Temperatur"
+  #   address: 0x0003
+  #   register_type: holding
+  #   value_type: S_WORD
+  #   unit_of_measurement: "°C"
+  #   accuracy_decimals: 1
+  #   filters:
+  #     - multiply: 0.1
 
   # ======================================================
   # NT18B07 – 7x NTC-Kanäle, je 0.1 °C, signed 16-bit
@@ -1977,6 +2047,24 @@ sensor:
   #   filters:
   #     - multiply: 0.1
       
+  # - platform: modbus_controller
+  #   modbus_controller_id: nt48a08
+  #   name: "NT48A08 NTC 1"
+  #   id: nt48a08_ntc1
+  #   register_type: holding
+  #   address: 0x0000
+  #   value_type: S_WORD
+  #   unit_of_measurement: "°C"
+  #   device_class: temperature
+  #   state_class: measurement
+  #   accuracy_decimals: 1
+  #   filters:
+  #     - multiply: 0.1
+  #     - lambda: |-
+  #         // -273.1°C (0xF555 bei manchen Modulen) / Ausreißer -> NaN
+  #         if (!isfinite(x) || x <= -100.0f || x >= 200.0f) return NAN;
+  #         return x;
+
   # TUF2000M Flow Rate Sensor (Modbus RTU via separate RS485 UART)
   - platform: modbus_controller
     modbus_controller_id: tuf2000m   # <- dein ID-Name
@@ -2391,30 +2479,6 @@ number:
       - lambda: |-
           id(kessel_soll_pool) = x;
           ESP_LOGI("Brenner", "Pool Kessel-Soll gesetzt: %.1f°C", x);
-  # Two holding registers that store the lock/password
-  - platform: modbus_controller
-    modbus_controller_id: tuf2000m      # <-- your TUF modbus_controller id
-    id: tuf_lock_reg_49
-    name: "TUF Lock Reg49"
-    address: 48
-    register_type: holding
-    value_type: U_WORD
-    min_value: 0
-    max_value: 9999
-    step: 1
-    mode: box
-
-  - platform: modbus_controller
-    modbus_controller_id: tuf2000m
-    id: tuf_lock_reg_50
-    name: "TUF Lock Reg50"
-    address: 49
-    register_type: holding
-    value_type: U_WORD
-    min_value: 0
-    max_value: 9999
-    step: 1
-    mode: box
 
   - platform: template
     name: "Mischer Zielposition (%)"
