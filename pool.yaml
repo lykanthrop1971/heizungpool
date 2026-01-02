@@ -469,14 +469,14 @@ switch:
       - mqtt.publish:
           topic: "shellypro2-ec626091d068/command/switch:1"
           payload: "on"
-          qos: 1
+          qos: 0
           retain: false
       - logger.log: "Shelly Pro 2 Relay 1 -> ON via MQTT"
     turn_off_action:
       - mqtt.publish:
           topic: "shellypro2-ec626091d068/command/switch:1"
           payload: "off"
-          qos: 1
+          qos: 0
           retain: false
       - logger.log: "Shelly Pro 2 Relay 1 -> OFF via MQTT"
   
@@ -512,14 +512,14 @@ switch:
       - mqtt.publish:
           topic: "shellypro2-ec626091d068/command/switch:0"
           payload: "on"
-          qos: 1
+          qos: 0
           retain: false
       - logger.log: "Shelly Pro 2 Relay 0 -> ON via MQTT"
     turn_off_action:
       - mqtt.publish:
           topic: "shellypro2-ec626091d068/command/switch:0"
           payload: "off"
-          qos: 1
+          qos: 0
           retain: false
       - logger.log: "Shelly Pro 2 Relay 0 -> OFF via MQTT"
 
@@ -674,7 +674,7 @@ script:
           id(pool_last_dac_v) = vv;
       - mqtt.publish:
           topic: "pool/dac/set"
-          qos: 1
+          qos: 0
           retain: false
           payload: !lambda |-
             char buf[16];

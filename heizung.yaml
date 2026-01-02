@@ -100,11 +100,25 @@ external_components:
 #  css_include: webserver.css
 #  js_include: webserver.js
 
+spi:
+  # TFT
+  - id: spi_tft
+    clk_pin: GPIO13
+    mosi_pin: GPIO21
+    # miso not needed for ILI9341
+
+  # TOUCH (LoRa header SPI)
+  - id: spi_touch
+    clk_pin: GPIO39
+    mosi_pin: GPIO43
+    miso_pin: GPIO44
+
 i2c:
   sda: 12
   scl: 11
   scan: true
   id: bus_a
+  frequency: 400kHz
 
 i2c_device:
   - id: eeprom
@@ -123,12 +137,16 @@ font:
   - file: "gfonts://Roboto"
     id: font_big
     size: 12
-
+  - file: "gfonts://Roboto"
+    id: tft_font_big
+    size: 26
+  - file: "gfonts://Roboto"
+    id: tft_font_med
+    size: 18
+  - file: "gfonts://Roboto"
+    id: tft_font_small
+    size: 14
 uart:
-  - id: uart_nextion
-    tx_pin: 13
-    rx_pin: 14
-    baud_rate: 115200
   - id: uart_rs485
     tx_pin: 17
     rx_pin: 18
@@ -214,32 +232,258 @@ output:
     gp8403_id: my_gp8403
     channel: 1
 
-# ---------------------------------------------------------
-# AB HIER fügst du deinen kompletten restlichen Code ein
-# (display: nextion ..., globals: ..., select:, switch:, binary_sensor:,
-# script:, button:, sensor:, text_sensor:, number:, time:, interval: ...)
-# genau so, wie du ihn im großen Block geschickt hast.
-# Die Struktur oben reicht, damit das Paket korrekt eingebunden wird.
-# ---------------------------------------------------------
 display:
-  - platform: nextion
-    id: nextion_display
-    uart_id: uart_nextion
-    on_setup:
-      then:
-        - lambda: |-
-            id(nextion_display).send_command("bkcmd=3");
+  - platform: ili9xxx
+    id: tft
+    model: ili9341
+    spi_id: spi_tft
+    cs_pin: GPIO8
+    dc_pin: GPIO48
+    reset_pin: GPIO14
+    invert_colors: false
+    data_rate: 10MHz
+    color_palette: 8BIT
+    update_interval: 250ms
+    rotation: 0
 
     lambda: |-
-      it.set_component_text("t_title", "HEIZUNG");
-    # Serve the TFT from HA (http or https). http is faster on small MCUs.
-    tft_url: http://192.168.1.56:8123/local/tft/heizung.tft
-    # optional: choose a page at connect
-    start_up_page: 0
+      const int W = 240;
+      const int H = 320;
+
+      // Layout
+      const int M = 8;                 // margin
+      const int HEADER_H = 44;
+      const int TAB_H = 40;
+      const int TAB_Y = H - TAB_H;
+
+      const int CONTENT_Y0 = HEADER_H;
+      const int CONTENT_Y1 = TAB_Y;
+
+      // 2-column grid
+      const int GAP = 8;
+      const int INNER_W = W - 2*M;     // 224
+      const int COL_W = (INNER_W - GAP) / 2; // 108
+      const int ROW_H = 56;            // card height
+
+      // Colors (pro look)
+      auto C_BG     = esphome::Color(10,10,12);
+      auto C_PANEL  = esphome::Color(22,22,26);
+      auto C_PANEL2 = esphome::Color(28,28,34);
+      auto C_STROKE = esphome::Color(60,60,70);
+      auto C_TEXT   = esphome::Color(240,240,240);
+      auto C_DIM    = esphome::Color(150,150,160);
+      auto C_ACC    = esphome::Color(255,200,40);   // accent (amber)
+      auto C_OK     = esphome::Color(60,220,120);
+      auto C_BAD    = esphome::Color(255,80,80);
+      auto C_CYAN   = esphome::Color(60,220,220);
+
+      auto fin = [&](float v)->bool { return std::isfinite(v); };
+
+      // helpers
+      auto panel = [&](int x,int y,int w,int h, bool strong=false) {
+        it.filled_rectangle(x,y,w,h, strong ? C_PANEL2 : C_PANEL);
+        it.rectangle(x,y,w,h, C_STROKE);
+      };
+
+      auto title = [&](const char* t) {
+        it.print(M, 10, id(tft_font_big), C_TEXT, t);
+      };
+
+      auto mode_pill = [&](int x,int y,const char* t, esphome::Color col) {
+        int pw = 56;
+        int ph = 22;
+        it.filled_rectangle(x,y,pw,ph, col);
+        it.rectangle(x,y,pw,ph, C_STROKE);
+        it.print(x+8, y+4, id(tft_font_small), esphome::Color(0,0,0), t);
+      };
+
+      auto card_value = [&](int x,int y,const char* label, float v, const char* unit, esphome::Color col) {
+        panel(x,y,COL_W,ROW_H);
+        it.print(x+8, y+6, id(tft_font_small), C_DIM, label);
+        if (fin(v)) {
+          // value line (fixed position, no overlap)
+          it.printf(x+8, y+26, id(tft_font_med), col, "%.1f%s", v, unit);
+        } else {
+          it.print(x+8, y+26, id(tft_font_med), C_DIM, "--");
+        }
+      };
+
+      auto card_text = [&](int x,int y,const char* label, const char* text, esphome::Color col) {
+        panel(x,y,COL_W,ROW_H);
+        it.print(x+8, y+6, id(tft_font_small), C_DIM, label);
+        it.print(x+8, y+26, id(tft_font_med), col, text);
+      };
+
+      auto btn = [&](int x,int y,int w,int h,const char* txt, bool active=false) {
+        it.filled_rectangle(x,y,w,h, active ? C_ACC : C_PANEL2);
+        it.rectangle(x,y,w,h, C_STROKE);
+        it.print(x+10, y+8, id(tft_font_small), active ? esphome::Color(0,0,0) : C_TEXT, txt);
+      };
+
+      // background
+      it.fill(C_BG);
+
+      // Header
+      if (id(ui_page)==0) title("HEAT");
+      else if (id(ui_page)==1) title("POOL");
+      else title("CONTROL");
+
+      // time right
+      if (id(ha_time).now().is_valid()) {
+        auto t = id(ha_time).now();
+        it.strftime(W-92, 12, id(tft_font_small), C_DIM, TextAlign::TOP_LEFT, "%H:%M:%S", t);
+      } else {
+        it.print(W-92, 12, id(tft_font_small), C_DIM, "--:--:--");
+      }
+
+      // Mode pill (short labels, no long strings)
+      // expects heizmodus_select.state in {"auto","summer","winter","pool"}
+      std::string sel = id(heizmodus_select).state;
+      const char* ml = "AUTO";
+      if (sel=="summer") ml="SUM";
+      else if (sel=="winter") ml="WIN";
+      else if (sel=="pool") ml="POOL";
+      mode_pill(W-64, 20, ml, (sel=="pool") ? C_CYAN : C_ACC);
+
+      // Content area coords
+      const int X0 = M;
+      const int X1 = M + COL_W + GAP;
+
+      int y = CONTENT_Y0 + 8;
+
+      // ======================
+      // PAGE 0: HEAT
+      // ======================
+      if (id(ui_page) == 0) {
+        // Row 1: AT / VL
+        card_value(X0, y, "OUTDOOR", id(outdoor).state, "C", C_TEXT);
+        card_value(X1, y, "VORLAUF",  id(vorlauftemperatur).state, "C", C_TEXT);
+        y += ROW_H + GAP;
+
+        // Row 2: WW / KS
+        card_value(X0, y, "WARM W.",  id(warmwassertemperatur).state, "C", C_TEXT);
+        card_value(X1, y, "KESSEL",   id(kesseltemperatur).state, "C", C_TEXT);
+        y += ROW_H + GAP;
+
+        // Row 3: Setpoints
+        card_value(X0, y, "VL-SOLL", id(zieltemperatur_input).state, "C", C_ACC);
+        card_value(X1, y, "WW-SOLL", id(warmwasser_zieltemperatur_input).state, "C", C_ACC);
+        y += ROW_H + GAP;
+
+        // Row 4: Status line (small, fixed)
+        panel(M, y, INNER_W, 44);
+        int sx = M + 8;
+        int sy = y + 12;
+
+        auto tag = [&](const char* t, bool on) {
+          it.filled_rectangle(sx, sy, 28, 20, on ? C_OK : C_PANEL2);
+          it.rectangle(sx, sy, 28, 20, C_STROKE);
+          it.print(sx+9, sy+4, id(tft_font_small), on ? esphome::Color(0,0,0) : C_DIM, t);
+          sx += 34;
+        };
+
+        tag("A", id(mischer_auf).state);
+        tag("Z", id(mischer_zu).state);
+        tag("HK", id(heizkreispumpe).state);
+        tag("WW", id(warmwasserpumpe).state);
+        tag("BR", id(brenner).state);
+      }
+
+      // ======================
+      // PAGE 1: POOL
+      // ======================
+      else if (id(ui_page) == 1) {
+        // Row 1: Temp / Flow
+        card_value(X0, y, "POOL TEMP", id(temp_sensor).state, "C", C_TEXT);
+        card_value(X1, y, "FLOW",      id(tuf2000m_flow_rate).state, "m3/h", C_TEXT);
+        y += ROW_H + GAP;
+
+        // Row 2: pH / ORP
+        panel(X0, y, COL_W, ROW_H);
+        it.print(X0+8, y+6, id(tft_font_small), C_DIM, "pH");
+        if (fin(id(ph_sensor).state)) it.printf(X0+8, y+26, id(tft_font_med), C_CYAN, "%.2f", id(ph_sensor).state);
+        else it.print(X0+8, y+26, id(tft_font_med), C_DIM, "--");
+
+        panel(X1, y, COL_W, ROW_H);
+        it.print(X1+8, y+6, id(tft_font_small), C_DIM, "ORP");
+        if (fin(id(orp_sensor).state)) it.printf(X1+8, y+26, id(tft_font_med), C_CYAN, "%.0f mV", id(orp_sensor).state);
+        else it.print(X1+8, y+26, id(tft_font_med), C_DIM, "--");
+        y += ROW_H + GAP;
+
+        // Row 3: Dosing / Filter
+        card_text(X0, y, "DOSING", id(dosierung_enable).state ? "ON" : "OFF", id(dosierung_enable).state ? C_OK : C_DIM);
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%s %.0f%%",
+                 id(filter_pumpe_enable_dac).state ? "ON" : "OFF",
+                 id(filter_pumpe_speed_pct).state);
+        card_text(X1, y, "FILTER", buf, id(filter_pumpe_enable_dac).state ? C_OK : C_DIM);
+        y += ROW_H + GAP;
+
+        // Row 4: Tank low flags
+        panel(M, y, INNER_W, 44);
+        bool low = id(chlor_low_level).state || id(ph_low_level).state;
+        it.print(M+8, y+6, id(tft_font_small), C_DIM, "TANK SAFETY");
+        it.printf(M+8, y+22, id(tft_font_med), low ? C_BAD : C_OK,
+                  "Chlor:%d  pH:%d", (int)id(chlor_low_level).state, (int)id(ph_low_level).state);
+      }
+
+      // ======================
+      // PAGE 2: CONTROL
+      // ======================
+      else {
+        // Row: VL setpoint controls
+        panel(M, y, INNER_W, 56);
+        it.print(M+8, y+6, id(tft_font_small), C_DIM, "VORLAUF SOLL");
+        it.printf(M+8, y+26, id(tft_font_med), C_ACC, "%.1fC", id(zieltemperatur_input).state);
+        btn(M+140, y+10, 40, 36, "-0.5");
+        btn(M+186, y+10, 40, 36, "+0.5");
+        y += 56 + GAP;
+
+        // Row: WW setpoint controls
+        panel(M, y, INNER_W, 56);
+        it.print(M+8, y+6, id(tft_font_small), C_DIM, "WARM W. SOLL");
+        it.printf(M+8, y+26, id(tft_font_med), C_ACC, "%.1fC", id(warmwasser_zieltemperatur_input).state);
+        btn(M+140, y+10, 40, 36, "-1");
+        btn(M+186, y+10, 40, 36, "+1");
+        y += 56 + GAP;
+
+        // Row: Mode buttons (2x2)
+        panel(M, y, INNER_W, 80);
+        it.print(M+8, y+6, id(tft_font_small), C_DIM, "MODE");
+        btn(M+8,   y+30, 52, 36, "AUTO", (sel=="auto"));
+        btn(M+68,  y+30, 52, 36, "SUM",  (sel=="summer"));
+        btn(M+128, y+30, 52, 36, "WIN",  (sel=="winter"));
+        btn(M+188, y+30, 44, 36, "POOL", (sel=="pool"));
+        y += 80 + GAP;
+
+        // Row: Pool controls
+        panel(M, y, INNER_W, 70);
+        it.print(M+8, y+6, id(tft_font_small), C_DIM, "POOL CONTROLS");
+
+        btn(M+8,   y+30, 70, 32, id(dosierung_enable).state ? "DOS OFF" : "DOS ON", id(dosierung_enable).state);
+        btn(M+86,  y+30, 60, 32, "SPD-5");
+        btn(M+152, y+30, 60, 32, "SPD+5");
+        btn(M+218, y+30, 14, 32, id(filter_pumpe_enable_dac).state ? "0" : "1", id(filter_pumpe_enable_dac).state);
+      }
+
+      // Tabbar
+      panel(0, TAB_Y, W, TAB_H, true);
+      const int TW = W/3;
+      auto tab = [&](int i, const char* t) {
+        int x = i*TW;
+        bool a = (id(ui_page)==i);
+        it.rectangle(x, TAB_Y, TW, TAB_H, a ? C_ACC : C_STROKE);
+        it.print(x+18, TAB_Y+12, id(tft_font_small), a ? C_ACC : C_TEXT, t);
+      };
+      tab(0,"HEAT");
+      tab(1,"POOL");
+      tab(2,"CTRL");
+
   - platform: ssd1306_i2c
     model: "SSD1306 128x64"
     address: 0x3C
     id: oled
+    update_interval: 2s
     rotation: 0
     lambda: |-
       it.printf(0, 0, id(font_big), "AF");
@@ -314,7 +558,117 @@ display:
       } else {
         it.printf(x+2, y, id(font_big), COLOR_ON, "B");
       }
+  
+touchscreen:
+  - platform: xpt2046
+    id: touch
+    spi_id: spi_touch
+    cs_pin: GPIO38
+    interrupt_pin: GPIO47
+    display: tft
+    update_interval: 30ms
+    threshold: 400
+
+    calibration:
+      x_min: 392
+      x_max: 3725
+      y_min: 423
+      y_max: 3791
+
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: true
+    on_touch:
+      then:
+        - lambda: |-
+            id(ui_touched) = true;
+            id(ui_last_x) = touch.x;
+            id(ui_last_y) = touch.y;
+
+            const uint32_t now = millis();
+            if (now - id(ui_last_touch_ms) < 150) return;
+            id(ui_last_touch_ms) = now;
+
+            const int x = touch.x;
+            const int y = touch.y;
+
+            // TABBAR: y >= 280
+            if (y >= 280) {
+              if (x < 80) id(ui_page) = 0;
+              else if (x < 160) id(ui_page) = 1;
+              else id(ui_page) = 2;
+              return;
+            }
+
+            // Only CTRL page has buttons
+            if (id(ui_page) != 2) return;
+
+            auto hit = [&](int x0,int y0,int w,int h)->bool {
+              return (x>=x0 && x<(x0+w) && y>=y0 && y<(y0+h));
+            };
+
+            // CTRL layout coordinates from display lambda:
+            // VL row panel starts at y=52, buttons at y=62..98
+            if (hit(148, 62, 40, 36)) { id(ui_vl_nudge).execute(-0.5f); return; }
+            if (hit(194, 62, 40, 36)) { id(ui_vl_nudge).execute(+0.5f); return; }
+
+            // WW row starts at y=116, buttons at y=126..162
+            if (hit(148, 126, 40, 36)) { id(ui_ww_nudge).execute(-1.0f); return; }
+            if (hit(194, 126, 40, 36)) { id(ui_ww_nudge).execute(+1.0f); return; }
+
+            // MODE panel starts at y=180, buttons at y=210..246
+            if (hit(16,  210, 52, 36)) { id(ui_set_mode).execute("auto"); return; }
+            if (hit(76,  210, 52, 36)) { id(ui_set_mode).execute("summer"); return; }
+            if (hit(136, 210, 52, 36)) { id(ui_set_mode).execute("winter"); return; }
+            if (hit(196, 210, 44, 36)) { id(ui_set_mode).execute("pool"); return; }
+
+            // POOL CONTROLS panel starts at y=268, buttons at y=298..330 (aber Tabbar beginnt bei 280)
+            // => wir legen die Pool-Control Buttons absichtlich in den Bereich y=238..270 (über Tabbar)
+            // Dafür bitte die Buttons im Display ggf. dort lassen – sonst nur Tabbar!
+            // Wenn du die Buttons so wie im Display oben belässt (y+30 bei y=268), liegen sie in Tabbar.
+            // Deshalb: in der Display-Lambda den Pool-Control-Panel y so setzen, dass es bei ~232 beginnt
+            // ODER: wir aktivieren hier nur SPD +/- und DOS in einem Bereich über der Tabbar:
+            //
+            // Quick-Fix Hitboxes (nur wenn du Pool Controls höher platzierst, z.B. y=232):
+            // if (hit(16,  262, 70, 32)) { id(ui_toggle_dosierung).execute(); return; }
+            // if (hit(94,  262, 60, 32)) { id(ui_filterpump_speed_nudge).execute(-5.0f); return; }
+            // if (hit(160, 262, 60, 32)) { id(ui_filterpump_speed_nudge).execute(+5.0f); return; }
+            // if (hit(226, 262, 14, 32)) { id(ui_toggle_filterpump).execute(); return; }
+
+    on_release:
+      then:
+        - lambda: |-
+            id(ui_touched) = false;
+
 globals:
+  - id: ui_page
+    type: int
+    restore_value: true
+    initial_value: "0"   # 0=HEAT, 1=POOL, 2=CTRL
+
+  - id: ui_touched
+    type: bool
+    initial_value: "false"
+
+  - id: ui_last_x
+    type: int
+    initial_value: "-1"
+  - id: ui_last_y
+    type: int
+    initial_value: "-1"
+
+  - id: ui_last_rawx
+    type: int
+    initial_value: "-1"
+  - id: ui_last_rawy
+    type: int
+    initial_value: "-1"
+
+  - id: ui_last_touch_ms
+    type: uint32_t
+    initial_value: "0"
+
   - id: last_hmi_mode_ms
     type: unsigned long
     restore_value: no
@@ -843,68 +1197,6 @@ binary_sensor:
       mode: INPUT
       inverted: true
 
-# --- HOME page setpoint nudges ---
-  - platform: nextion
-    id: touch_b_flow_minus
-    internal: true
-    component_name: home.b_flow_minus
-    on_press:
-      - logger.log: "HMI: b_dhw_plus gedrückt"
-#      - number.decrement: zieltemperatur_input
-  - platform: nextion
-    id: touch_b_flow_plus
-    internal: true
-    component_name: home.b_flow_plus
-    on_press:
-      - number.increment: zieltemperatur_input
-  - platform: nextion
-    id: touch_b_dhw_minus
-    internal: true
-    component_name: home.b_dhw_minus
-    on_press:
-      - number.decrement: warmwasser_zieltemperatur_input
-  - platform: nextion
-    id: touch_b_dhw_plus
-    internal: true
-    component_name: home.b_dhw_plus
-    on_press:
-      - number.increment: warmwasser_zieltemperatur_input
-  - platform: nextion
-    id: touch_b_boiler_minus
-    internal: true
-    component_name: home.b_boiler_minus
-    on_press:
-      - number.decrement: kessel_soll_summer_idle_input
-  - platform: nextion
-    id: touch_b_boiler_plus
-    internal: true
-    component_name: home.b_boiler_plus
-    on_press:
-      - number.increment: kessel_soll_summer_idle_input
-
-  - platform: nextion
-    id: touch_mode_winter_by_id
-    page_id: 0
-    component_id: 24        # <— ID aus Log für WINTER
-    on_press:
-      - logger.log: "HMI: Winter gedrückt (per ID)"
-      - script.execute: { id: set_mode_from_hmi, mode: "winter" }
-
-  - platform: nextion
-    id: touch_mode_sommer_by_id
-    page_id: 0
-    component_id: 25        # <— ID aus Log für SOMMER
-    on_press:
-      - logger.log: "HMI: Sommer gedrückt (per ID)"
-      - script.execute: { id: set_mode_from_hmi, mode: "summer" }
-
-  - platform: nextion
-    id: touch_mode_pool_by_id
-    page_id: 0
-    component_id: 26        # <— ID aus Log für POOL (bitte ermitteln)
-    on_press:
-      - logger.log: "HMI: Pool gedrückt (per ID)"
-      - script.execute: { id: set_mode_from_hmi, mode: "pool" }
 
   - platform: template
     name: "Schwingung erkannt"
@@ -1011,17 +1303,84 @@ script:
             id(heizmodus) = eff;
             ESP_LOGI("MODE","Effektiver Modus -> %s (Select=%s)", eff.c_str(), sel.c_str());
           }
+  - id: ui_vl_nudge
+    mode: restart
+    parameters:
+      delta: float
+    then:
+      - lambda: |-
+          float cur = id(zieltemperatur_input).state;
+          if (!std::isfinite(cur)) cur = 35.0f;
+          float nv = cur + delta;
+          if (nv < 20.0f) nv = 20.0f;
+          if (nv > 60.0f) nv = 60.0f;
+          auto call = id(zieltemperatur_input).make_call();
+          call.set_value(nv);
+          call.perform();
+          ESP_LOGI("UI", "VL setpoint -> %.1f", nv);
 
+  - id: ui_ww_nudge
+    mode: restart
+    parameters:
+      delta: float
+    then:
+      - lambda: |-
+          float cur = id(warmwasser_zieltemperatur_input).state;
+          if (!std::isfinite(cur)) cur = 50.0f;
+          float nv = cur + delta;
+          if (nv < 30.0f) nv = 30.0f;
+          if (nv > 60.0f) nv = 60.0f;
+          auto call = id(warmwasser_zieltemperatur_input).make_call();
+          call.set_value(nv);
+          call.perform();
+          ESP_LOGI("UI", "WW setpoint -> %.1f", nv);
+
+  - id: ui_set_mode
+    mode: restart
+    parameters:
+      mode: string
+    then:
+      - lambda: |-
+          id(heizmodus_select).publish_state(mode);
+          ESP_LOGI("UI", "Mode -> %s", mode.c_str());
+
+  - id: ui_toggle_filterpump
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: filter_pumpe_enable_dac
+          then:
+            - switch.turn_off: filter_pumpe_enable_dac
+          else:
+            - switch.turn_on: filter_pumpe_enable_dac
+
+  - id: ui_filterpump_speed_nudge
+    mode: restart
+    parameters:
+      delta: float
+    then:
+      - lambda: |-
+          float cur = id(filter_pumpe_speed_pct).state;
+          if (!std::isfinite(cur)) cur = 50.0f;
+          float nv = cur + delta;
+          if (nv < 0.0f) nv = 0.0f;
+          if (nv > 100.0f) nv = 100.0f;
+          auto call = id(filter_pumpe_speed_pct).make_call();
+          call.set_value(nv);
+          call.perform();
+          ESP_LOGI("UI", "Filter speed -> %.0f%%", nv);
+
+  - id: ui_toggle_dosierung
+    mode: restart
+    then:
+      - lambda: |-
+          bool cur = id(dosierung_enable).state;
+          id(dosierung_enable).publish_state(!cur);
+          ESP_LOGI("UI", "Dosierung -> %s", (!cur) ? "ON" : "OFF");
 
 
 button:
-  - platform: template
-    id: update_nextion_button
-    name: "Update Nextion"
-    entity_category: diagnostic
-    on_press:
-      then:
-        - lambda: 'id(nextion_display)->upload_tft();'
   - platform: template
     name: "EEPROM Self-Test"
     id: eeprom_self_test
@@ -3047,78 +3406,6 @@ interval:
 
   - interval: 1s
     then:
-      - lambda: |-
-          char degC[3] = { (char)0xB0, 'C', 0 };   // "°C" as raw bytes
-          // Clock (HH:MM)
-          if (id(sntp_time).now().is_valid()) {
-            char tbuf[6];
-            snprintf(tbuf, sizeof(tbuf), "%02d:%02d", id(sntp_time).now().hour, id(sntp_time).now().minute);
-            id(nextion_display).set_component_text("home.t_time", tbuf);
-          }
-          // small helper to print temperatures safely
-          auto print_temp = [&](const char* comp, float v) {
-            if (!std::isfinite(v)) {
-              id(nextion_display).set_component_text(comp, "--");
-              return;
-            }
-            char buf[16];
-            snprintf(buf, sizeof(buf), "%.1f%s", v, degC);
-            id(nextion_display).set_component_text(comp, buf);
-          };
-          // --- HOME page values ---
-          print_temp("home.t_out", id(outdoor).state);
-          print_temp("home.t_flow", id(vorlauftemperatur).state);
-          print_temp("home.t_flow_sp", id(zieltemperatur));
-          print_temp("home.t_boiler",  id(kesseltemperatur).state);
-          print_temp("home.t_dhw",  id(warmwassertemperatur).state);
-          print_temp("home.t_dhw_sp", id(warmwasser_zieltemperatur));
-          print_temp("home.t_boiler_sp", id(vessel_soll));
-          // Warmwasser-Soll (use your GLOBAL 'warmwasser_zieltemperatur' or the number entity)
-          int rot = 63488;
-          int weiss = 65535;
-          int color = weiss;
-          std::string mode_text;
-
-          // Modustext für UI
-          std::string sel = id(heizmodus_select).state;   // gewählter Modus
-          bool is_winter_auto = id(saison_auto_is_winter);
-
-          if (sel == "pool") {
-            mode_text = "Pool";
-          } else if (sel == "winter") {
-            mode_text = "Winter";
-          } else if (sel == "summer") {
-            mode_text = "Sommer";
-          } else {  // "auto"
-            mode_text = is_winter_auto ? "Auto (Winter)" : "Auto (Sommer)";
-          }
-          id(nextion_display).set_component_text("home.t_mode", mode_text.c_str());
-          // Falls du die Farbe wirklich ändern willst, entkommentieren:
-          // char cmd[48];
-          // snprintf(cmd, sizeof(cmd), "home.t_mode.txt_color=%d", color);
-          // id(nextion_display).send_command(cmd);
-
-          //std::string mode = id(heizmodus);
-          //if (mode == "summer") {
-          //  mode_text = "Sommer";
-          //  color = rot;
-          //} else if (mode == "winter") {
-          //  mode_text = "Winter";
-          //  color = rot;
-          //} else if (mode == "pool") {
-          //  mode_text = "Pool";
-          //  color = rot;
-          //} else {
-          //  mode_text = mode.c_str();
-          //  color = weiss;
-          //}
-          //id(nextion_display).set_component_text("home.t_mode", mode_text.c_str());
-          char cmd[40];
-          snprintf(cmd, sizeof(cmd), "home.t_mode.txt_color=%d", color);
-          //id(nextion_display).send_command(cmd);
-
-          // --- Betriebsstunden Integrator + Persistenz ---
-
       - lambda: |-
           // --- Rollendes 24h-Fenster NUR aus brennerbetrieb_bz ---
           // Zählt Starts (OFF->ON) und aufsummierte ON-Sekunden pro Minute.

@@ -2,8 +2,8 @@ substitutions:
   fw_version: "0.9.0"
 
 esphome:
-  name: a6v3
-  friendly_name: a6v3
+  name: a6v3_2
+  friendly_name: a6v3_2
   includes:
     - webui.h        # Enthält dein eigenes HTML-UI
   project:
@@ -44,22 +44,13 @@ web_server:
 
 # Logger (Debug für Tests)
 logger:
-#  level: DEBUG
   level: WARN
   logs:
-    # Wichtig: diese Warnungen sehen
+    preferences: WARN
     component: WARN
-    modbus_controller: WARN
-    modbus: WARN
     wifi: WARN
     mqtt: WARN
 
-    # Deine Spam-Infos weg:
-    sensor: ERROR
-
-    # Wenn MIXER_FAST/Brenner zu viel ist:
-    MIXER_FAST: ERROR
-    Brenner: ERROR
 
 
 # Home Assistant / API Verbindung
