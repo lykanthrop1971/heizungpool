@@ -1,5 +1,6 @@
 #pragma once
 #include "esphome.h"
+#include "esp_task_wdt.h"
 #include "esphome/components/web_server_base/web_server_base.h"
 
 using namespace esphome;
@@ -253,7 +254,7 @@ load();
     temps["Vorlauf"]     = id(vorlauftemperatur).state;
     temps["Warmwasser"]  = id(warmwassertemperatur).state;
     temps["Kessel"]      = id(kesseltemperatur).state;
-    temps["Rücklauf"]    = id(temp8).state;           // in deinem Log vorhanden
+    temps["Rücklauf"]    = id(ruecklauftemperatur).state;           // in deinem Log vorhanden
 
     // Aktoren
     JsonObject actors = doc["actors"].to<JsonObject>();

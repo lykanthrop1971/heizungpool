@@ -59,6 +59,10 @@ globals:
     type: float
     restore_value: no
     initial_value: "NAN"
+  - id: ui_last_wifi_state
+    type: int
+    restore_value: no
+    initial_value: "-99"
   - id: ui_last_ctl_vl
     type: float
     restore_value: no
@@ -109,6 +113,10 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
+  - id: ui_wifi_dirty
+    type: bool
+    restore_value: no
+    initial_value: "false"
   - id: ui_ctl_vl_dirty
     type: bool
     restore_value: no
@@ -137,10 +145,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: "false"
-  - id: ui_last_touch_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: "0"
   - id: ui_page
     type: int
     restore_value: no
@@ -149,10 +153,6 @@ globals:
     type: bool
     restore_value: no
     initial_value: "true"   # on boot: force initial draw
-  - id: ui_page_cooldown_ms
-    type: uint32_t
-    restore_value: no
-    initial_value: "0"
 
 
 
@@ -177,8 +177,6 @@ esphome:
       - delay: 10000ms
       - lambda: |-
           id(ui_ready) = true;
-          id(ui_last_touch_ms) = millis();
-      - output.turn_on: lcd_backlight_out
       - script.execute: ui_refresh_fast
       - script.execute: ui_refresh_slow
 
@@ -187,20 +185,29 @@ esphome:
 font:
   - file: "gfonts://Roboto"
     id: ui_font_xl
-    size: 26
-    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–./_?'
+    size: 30
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–·±().,/_'
   - file: "gfonts://Roboto"
     id: ui_font_l
-    size: 20
-    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–./_?'
+    size: 22
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–·±().,/_'
   - file: "gfonts://Roboto"
     id: ui_font_m
-    size: 15
-    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–./_?'
+    size: 17
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–·±().,/_'
   - file: "gfonts://Roboto"
     id: ui_font_s
-    size: 12
-    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–./_?'
+    size: 13
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-–·±().,/_'
+  - file: "materialdesignicons-webfont.ttf"
+    id: mdi_wifi_24
+    size: 24
+    glyphs:
+      - "\U000F091F"
+      - "\U000F0922"
+      - "\U000F0925"
+      - "\U000F0928"
+      - "\U000F092D"
 
 
 # ---------------- Display (uses your existing spi_tft) ----------------
@@ -217,10 +224,6 @@ display:
     rotation: 0
     update_interval: never
 
-output:
-  - platform: ledc
-    id: lcd_backlight_out
-    pin: GPIO16
 
 # ---------------- Touch (uses your existing spi_touch) ----------------
 touchscreen:
@@ -231,14 +234,10 @@ touchscreen:
     interrupt_pin:
       number: GPIO47
       mode: INPUT_PULLUP
-      inverted: false
+      inverted: true
     display: tft
+    update_interval: 150ms
     threshold: 400
-    on_touch:
-      then:
-        - lambda: |-
-            id(ui_last_touch_ms) = millis();
-        - output.turn_on: lcd_backlight_out
 
     calibration:
       x_min: 392
@@ -266,7 +265,7 @@ sensor:
 
 
 interval:
-  - interval: 5s
+  - interval: 2s
     startup_delay: 2s
     then:
       - if:
@@ -275,16 +274,7 @@ interval:
           then:
             - script.execute: ui_refresh_fast
 
-  - interval: 5s
-    startup_delay: 5s
-    then:
-      - lambda: |-
-          const uint32_t now = millis();
-          if (now - id(ui_last_touch_ms) > 60000UL) {
-            id(lcd_backlight_out).turn_off();
-          }
-
-  - interval: 5s
+  - interval: 15s
     startup_delay: 9s
     then:
       - if:
@@ -312,17 +302,7 @@ script:
       - if:
           condition:
             lambda: |-
-              return isfinite(id(dbg_heap_free_bytes).state) && id(dbg_heap_free_bytes).state < 28000;
-          then:
-            - lambda: 'id(ui_busy) = false; return;'
-
-      # page-change cooldown to avoid heavy redraw bursts
-      - if:
-          condition:
-            lambda: |-
-              const uint32_t now = millis();
-              return id(ui_page_cooldown_ms) != 0 &&
-                     (now - id(ui_page_cooldown_ms)) < 800UL;
+              return isfinite(id(dbg_heap_free_bytes).state) && id(dbg_heap_free_bytes).state < 30000;
           then:
             - lambda: 'id(ui_busy) = false; return;'
 
@@ -388,6 +368,19 @@ script:
           id(ui_brenner_dirty) = b_dirty;
           d_status |= b_dirty;
 
+          int wifi_state = -1;
+          const float r = id(ui_wifi_rssi).state;
+          if (std::isfinite(r)) {
+            if (r >= -55) wifi_state = 4;
+            else if (r >= -67) wifi_state = 3;
+            else if (r >= -80) wifi_state = 2;
+            else wifi_state = 1;
+          }
+          const bool wifi_dirty = (wifi_state != id(ui_last_wifi_state));
+          if (wifi_dirty) id(ui_last_wifi_state) = wifi_state;
+          id(ui_wifi_dirty) = wifi_dirty;
+          d_status |= wifi_dirty;
+
           // --- Control (page 1) ---
           bool d_control = false;
           const bool ctl_vl_dirty = chg(id(ui_last_ctl_vl), id(zieltemperatur_input).state, 0.1f);
@@ -432,15 +425,6 @@ script:
           then:
             - lambda: 'id(ui_busy) = false; return;'
 
-      - if:
-          condition:
-            lambda: |-
-              return isfinite(id(dbg_heap_free_bytes).state) &&
-                     id(dbg_heap_free_bytes).state < 28000;
-          then:
-            - lambda: 'id(ui_busy) = false;'
-            - script.stop: ui_refresh_fast
-
       # ---------- STATUS page (0) ----------
       - if:
           condition:
@@ -456,6 +440,8 @@ script:
                         if (!std::isfinite(id(vorlauftemperatur).state)) return std::string("-");
                         char b[16]; snprintf(b, sizeof(b), "%.1f°C", id(vorlauftemperatur).state);
                         return std::string(b);
+
+            - delay: 2ms
 
             # ---------- Header pumps ----------
             - if:
@@ -502,6 +488,22 @@ script:
                               - lvgl.label.update: { id: lbl_brenner, styles: burner_on }
                             else:
                               - lvgl.label.update: { id: lbl_brenner, styles: burner_off }
+
+            - if:
+                condition:
+                  lambda: "return id(ui_page_dirty) || id(ui_wifi_dirty);"
+                then:
+                  - lvgl.label.update:
+                      id: lbl_wifi_icon
+                      text: !lambda |-
+                        const float r = id(ui_wifi_rssi).state;
+                        if (!std::isfinite(r)) return std::string("\U000F092D");
+                        if (r >= -55) return std::string("\U000F0928");
+                        if (r >= -67) return std::string("\U000F0925");
+                        if (r >= -80) return std::string("\U000F0922");
+                        return std::string("\U000F091F");
+
+            - delay: 2ms
 
             # ---------- Cards ----------
             - if:
@@ -607,6 +609,54 @@ script:
 
             - delay: 2ms
 
+            # ---------- Mode highlight only on change ----------
+            - if:
+                condition:
+                  lambda: |-
+                    return id(ui_mode_dirty) &&
+                           isfinite(id(dbg_heap_free_bytes).state) &&
+                           id(dbg_heap_free_bytes).state > 40000;
+                then:
+                  - if:
+                      condition:
+                        lambda: 'return id(heizmodus_select).state == "auto";'
+                      then:
+                        - lvgl.button.update: { id: btn_mode_auto, styles: mode_btn_active }
+                        - lvgl.label.update:  { id: txt_mode_auto, styles: mode_txt_active }
+                      else:
+                        - lvgl.button.update: { id: btn_mode_auto, styles: mode_btn }
+                        - lvgl.label.update:  { id: txt_mode_auto, styles: mode_txt }
+
+                  - if:
+                      condition:
+                        lambda: 'return id(heizmodus_select).state == "summer";'
+                      then:
+                        - lvgl.button.update: { id: btn_mode_summer, styles: mode_btn_active }
+                        - lvgl.label.update:  { id: txt_mode_summer, styles: mode_txt_active }
+                      else:
+                        - lvgl.button.update: { id: btn_mode_summer, styles: mode_btn }
+                        - lvgl.label.update:  { id: txt_mode_summer, styles: mode_txt }
+
+                  - if:
+                      condition:
+                        lambda: 'return id(heizmodus_select).state == "winter";'
+                      then:
+                        - lvgl.button.update: { id: btn_mode_winter, styles: mode_btn_active }
+                        - lvgl.label.update:  { id: txt_mode_winter, styles: mode_txt_active }
+                      else:
+                        - lvgl.button.update: { id: btn_mode_winter, styles: mode_btn }
+                        - lvgl.label.update:  { id: txt_mode_winter, styles: mode_txt }
+
+                  - if:
+                      condition:
+                        lambda: 'return id(heizmodus_select).state == "pool";'
+                      then:
+                        - lvgl.button.update: { id: btn_mode_pool, styles: mode_btn_active }
+                        - lvgl.label.update:  { id: txt_mode_pool, styles: mode_txt_active }
+                      else:
+                        - lvgl.button.update: { id: btn_mode_pool, styles: mode_btn }
+                        - lvgl.label.update:  { id: txt_mode_pool, styles: mode_txt }
+
       # ---------- POOL page (2) ----------
       - if:
           condition:
@@ -664,7 +714,7 @@ script:
       - if:
           condition:
             lambda: |-
-              return isfinite(id(dbg_heap_free_bytes).state) && id(dbg_heap_free_bytes).state < 28000;
+              return isfinite(id(dbg_heap_free_bytes).state) && id(dbg_heap_free_bytes).state < 30000;
           then:
             - lambda: 'id(ui_busy) = false; return;'
       - if:
@@ -762,7 +812,7 @@ lvgl:
   touchscreens:
     - touchscreen_id: touch
   color_depth: 16
-  buffer_size: 0.5%
+  buffer_size: 12%
   disp_bg_color: 0x070B12
   default_font: ui_font_m
   log_level: ERROR
@@ -771,33 +821,33 @@ lvgl:
     label:
       text_color: 0xE7EEF9
     button:
-      bg_color: 0x070B12
+      bg_color: 0x132033
       bg_opa: COVER
-      radius: 0
-      border_width: 0
+      radius: 14
+      border_width: 1
+      border_color: 0x22324B
       pressed:
-        bg_color: 0x070B12
+        bg_color: 0x1A2A42
     buttonmatrix:
       bg_opa: TRANSP
-      radius: 0
       border_width: 0
       pad_all: 0
       items:
-        bg_color: 0x070B12
+        bg_color: 0x0F1726
         bg_opa: COVER
-        radius: 0
-        border_width: 0
-        text_color: 0xE7EEF9
+        border_width: 1
+        border_color: 0x22324B
+        text_color: 0x9FB0C8
         pressed:
-          bg_color: 0x070B12
+          bg_color: 0x1A2A42
           text_color: 0xFFFFFF
         checked:
-          bg_color: 0x070B12
+          bg_color: 0x2B6FFF
           text_color: 0xFFFFFF
 
   style_definitions:
     - id: hdr
-      bg_color: 0x070B12
+      bg_color: 0x0B1220
       bg_opa: COVER
       border_width: 0
       pad_left: 10
@@ -806,34 +856,37 @@ lvgl:
       pad_bottom: 6
 
     - id: chip
-      bg_color: 0x070B12
+      bg_color: 0x0F1726
       bg_opa: COVER
-      radius: 0
+      radius: 12
       pad_left: 8
       pad_right: 8
       pad_top: 4
       pad_bottom: 4
-      border_width: 0
+      border_width: 1
+      border_color: 0x22324B
 
     - id: card
-      bg_color: 0x070B12
+      bg_color: 0x0B1424
       bg_opa: COVER
-      radius: 0
+      radius: 18
       pad_left: 12
       pad_right: 12
       pad_top: 6
       pad_bottom: 6
-      border_width: 0
+      border_width: 1
+      border_color: 0x22324B
 
     - id: hero
-      bg_color: 0x070B12
+      bg_color: 0x0D1A2F
       bg_opa: COVER
-      radius: 0
+      radius: 20
       pad_left: 14
       pad_right: 14
       pad_top: 12
       pad_bottom: 10
-      border_width: 0
+      border_width: 1
+      border_color: 0x2B6FFF
 
     - id: title
       text_color: 0x9FB0C8
@@ -858,20 +911,22 @@ lvgl:
       pad_all: 4
 
     - id: mode_btn
-      bg_color: 0x070B12
+      bg_color: 0x0F1726
       bg_opa: COVER
-      radius: 0
-      border_width: 0
+      radius: 14
+      border_width: 1
+      border_color: 0x22324B
       pad_left: 8
       pad_right: 8
       pad_top: 6
       pad_bottom: 6
 
     - id: mode_btn_active
-      bg_color: 0x070B12
+      bg_color: 0x2B6FFF
       bg_opa: COVER
-      radius: 0
-      border_width: 0
+      radius: 14
+      border_width: 1
+      border_color: 0x2B6FFF
       pad_left: 8
       pad_right: 8
       pad_top: 6
@@ -882,12 +937,6 @@ lvgl:
       border_width: 0
       pad_all: 0
 
-    - id: nav_btn
-      bg_opa: TRANSP
-      border_width: 0
-      radius: 0
-      pad_all: 0
-
     - id: mode_txt
       text_color: 0x9FB0C8
       text_font: ui_font_m
@@ -895,6 +944,10 @@ lvgl:
     - id: mode_txt_active
       text_color: 0xFFFFFF
       text_font: ui_font_m
+
+    - id: wifi_icon
+      text_font: mdi_wifi_24
+      text_color: 0xE7EEF9
 
     - id: pump_on
       text_color: 0xFF3B30
@@ -921,78 +974,77 @@ lvgl:
       - obj:
           align: bottom_mid
           width: 240
-          height: 26
-          scrollable: false
+          height: 52
           styles: nav
           widgets:
-            - button:
-                align: left_mid
-                x: 2
-                width: 52
-                height: 22
-                styles: nav_btn
-                on_press:
-                  then:
-                    - lambda: |-
-                        id(ui_page) = 0;
-                        id(ui_page_dirty) = true;
-                        id(ui_page_cooldown_ms) = millis();
-                    - lvgl.page.show: page_heat_status
-                    - delay: 1s
-                    - script.execute: ui_refresh_fast
-            - button:
-                align: left_mid
-                x: 62
-                width: 52
-                height: 22
-                styles: nav_btn
-                on_press:
-                  then:
-                    - lambda: |-
-                        id(ui_page) = 1;
-                        id(ui_page_dirty) = true;
-                        id(ui_page_cooldown_ms) = millis();
-                    - lvgl.page.show: page_heat_control
-                    - delay: 1s
-                    - script.execute: ui_refresh_fast
-            - button:
-                align: left_mid
-                x: 122
-                width: 52
-                height: 22
-                styles: nav_btn
-                on_press:
-                  then:
-                    - lambda: |-
-                        id(ui_page) = 2;
-                        id(ui_page_dirty) = true;
-                        id(ui_page_cooldown_ms) = millis();
-                    - lvgl.page.show: page_pool
-                    - delay: 1s
-                    - script.execute: ui_refresh_fast
-            - button:
-                align: left_mid
-                x: 182
-                width: 52
-                height: 22
-                styles: nav_btn
-                on_press:
-                  then:
-                    - lambda: |-
-                        id(ui_page) = 3;
-                        id(ui_page_dirty) = true;
-                        id(ui_page_cooldown_ms) = millis();
-                    - lvgl.page.show: page_system
-                    - delay: 1s
-                    - script.execute: ui_refresh_fast
-            - label: { text: "St",   align: left_mid, x: 20,  styles: title }
-            - label: { text: "Ctl",  align: left_mid, x: 76,  styles: title }
-            - label: { text: "Pool", align: left_mid, x: 128, styles: title }
-            - label: { text: "Sys",  align: left_mid, x: 190, styles: title }
+            - buttonmatrix:
+                id: nav_matrix
+                one_checked: true
+                width: 240
+                height: 44
+                pad_row: 0
+                pad_column: 6
+                rows:
+                  - buttons:
+                      - id: nav_status
+                        text: "Status"
+                        control: { checkable: true, checked: true }
+                        on_value:
+                          then:
+                            - if:
+                                condition: { lambda: "return x;" }
+                                then:
+                                  - lambda: |-
+                                      id(ui_page) = 0;
+                                      id(ui_page_dirty) = true;
+                                  - lvgl.page.show: page_heat_status
+                                  - script.execute: ui_refresh_fast
+
+                      - id: nav_control
+                        text: "Control"
+                        control: { checkable: true }
+                        on_value:
+                          then:
+                            - if:
+                                condition: { lambda: "return x;" }
+                                then:
+                                  - lambda: |-
+                                      id(ui_page) = 1;
+                                      id(ui_page_dirty) = true;
+                                  - lvgl.page.show: page_heat_control
+                                  - script.execute: ui_refresh_fast
+
+                      - id: nav_pool
+                        text: "Pool"
+                        control: { checkable: true }
+                        on_value:
+                          then:
+                            - if:
+                                condition: { lambda: "return x;" }
+                                then:
+                                  - lambda: |-
+                                      id(ui_page) = 2;
+                                      id(ui_page_dirty) = true;
+                                  - lvgl.page.show: page_pool
+                                  - script.execute: ui_refresh_fast
+
+                      - id: nav_system
+                        text: "System"
+                        control: { checkable: true }
+                        on_value:
+                          then:
+                            - if:
+                                condition: { lambda: "return x;" }
+                                then:
+                                  - lambda: |-
+                                      id(ui_page) = 3;
+                                      id(ui_page_dirty) = true;
+                                  - lvgl.page.show: page_system
+                                  - script.execute: ui_refresh_fast
+                                  - script.execute: ui_refresh_slow
 
   pages:
     - id: page_heat_status
-      scrollable: false
       widgets:
         - obj:
             align: top_left
@@ -1006,6 +1058,7 @@ lvgl:
               - label: { id: lbl_brenner, text: "B", align: right_mid, x: -76, styles: burner_off }
               - label: { id: lbl_pump_hz, text: "H", align: right_mid, x: -56, styles: pump_off }
               - label: { id: lbl_pump_ww, text: "W", align: right_mid, x: -36, styles: pump_off }
+              - label: { id: lbl_wifi_icon, text: "\U000F092D", align: right_mid, x: -8, styles: wifi_icon }
 
         - obj:
             align: top_left
@@ -1062,10 +1115,10 @@ lvgl:
               - label: { text: "Niveau", styles: title, align: top_left }
               - label: { id: lbl_card_level, text: "-", styles: vl, align: center }
               - button:
-                  width: 28
-                  height: 28
+                  width: 36
+                  height: 32
                   align: left_mid
-                  x: 2
+                  x: 0
                   styles: ghost_btn
                   on_press:
                     then:
@@ -1073,10 +1126,10 @@ lvgl:
                   widgets:
                     - label: { text: "–", align: center, styles: vm }
               - button:
-                  width: 28
-                  height: 28
+                  width: 36
+                  height: 32
                   align: right_mid
-                  x: -2
+                  x: 0
                   styles: ghost_btn
                   on_press:
                     then:
@@ -1096,7 +1149,6 @@ lvgl:
               - label: { id: lbl_card_slope, text: "-", styles: vl, align: bottom_left }
 
     - id: page_heat_control
-      scrollable: false
       widgets:
         - obj:
             align: top_left
@@ -1244,7 +1296,6 @@ lvgl:
                     - label: { text: "+", align: center, styles: vm }
 
     - id: page_pool
-      scrollable: false
       widgets:
         - obj:
             align: top_left
@@ -1321,7 +1372,6 @@ lvgl:
                     - label: { text: "Toggle", align: center, styles: vm }
 
     - id: page_system
-      scrollable: false
       widgets:
         - obj:
             align: top_left

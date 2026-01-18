@@ -1,0 +1,1080 @@
+# ui_text_koenigsweg.yaml
+# TEXT UI "Königsweg" (ohne LVGL): Static layout nur bei Page-Entry, sonst Partial-Redraw
+# Display: ILI9341 240x320 (ili9xxx)
+# Touch: XPT2046 + IRQ GPIO47
+# ESPHome: 2025.7.5
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+globals:
+  - id: ui_ready
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: ui_busy
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  # 0=Status, 1=Control, 2=Pool, 3=System
+  - id: ui_page
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: ui_force_redraw
+    type: bool
+    restore_value: no
+    initial_value: "true"
+
+  # per-page static layout drawn?
+  - id: ui_static_status
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: ui_static_control
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: ui_static_pool
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: ui_static_system
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+  - id: ui_last_touch_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  # Cache (Dirty Detection)
+  - id: ui_last_mode
+    type: int
+    restore_value: no
+    initial_value: "-1"
+  - id: ui_last_wifi
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+
+  - id: ui_last_vl
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_out
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_kessel
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_rl
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_ww
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_mixer
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+
+  - id: ui_last_sp_vl
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_sp_ww
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+
+  - id: ui_last_pump_hz
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_pump_ww
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+
+  - id: ui_last_burner_relay
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_burner_bz
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+
+  - id: ui_last_pool_fp
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_pool_speed
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+  - id: ui_last_pool_dos
+    type: float
+    restore_value: no
+    initial_value: "NAN"
+
+esphome:
+  on_boot:
+    priority: -100
+    then:
+      - delay: 8000ms
+      - lambda: |-
+          id(ui_ready) = true;
+          id(ui_force_redraw) = true;
+      - script.execute: ui_show_current_page
+      - script.execute: ui_refresh_fast
+
+font:
+  - file: "gfonts://Roboto"
+    id: ui_font_l
+    size: 22
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-().,/_'
+  - file: "gfonts://Roboto"
+    id: ui_font_m
+    size: 16
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-().,/_'
+  - file: "gfonts://Roboto"
+    id: ui_font_s
+    size: 12
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-().,/_'
+
+display:
+  - platform: ili9xxx
+    id: tft
+    model: ili9341
+    spi_id: spi_tft
+    cs_pin: GPIO8
+    dc_pin: GPIO48
+    reset_pin: GPIO14
+    invert_colors: false
+    data_rate: 10MHz   # wenn stabil: 20MHz/27MHz/40MHz testen
+    rotation: 0
+    color_palette: 8BIT
+    update_interval: never
+    auto_clear_enabled: false
+
+    pages:
+      # ==========================================================
+      # PAGE 0: STATUS
+      # ==========================================================
+      - id: page_heat_status
+        lambda: |-
+          const auto BG      = Color(0x07, 0x0B, 0x12);
+          const auto HDR     = Color(0x0B, 0x12, 0x20);
+          const auto CARD    = Color(0x0B, 0x14, 0x24);
+          const auto HERO    = Color(0x0D, 0x1A, 0x2F);
+          const auto ACCENT  = Color(0x2B, 0x6F, 0xFF);
+          const auto TXT     = Color(0xE7, 0xEE, 0xF9);
+          const auto MUTED   = Color(0x9F, 0xB0, 0xC8);
+          const auto RED     = Color(0xFF, 0x3B, 0x30);
+          const auto YELLOW  = Color(0xFF, 0xCC, 0x00);
+          const auto BORDER  = Color(0x22, 0x32, 0x4B);
+
+          auto f1 = [&](float v)->std::string {
+            if (!std::isfinite(v)) return std::string("-");
+            char b[16]; snprintf(b, sizeof(b), "%.1f°C", v);
+            return std::string(b);
+          };
+          auto f0pct = [&](float v)->std::string {
+            if (!std::isfinite(v)) return std::string("-");
+            char b[16]; snprintf(b, sizeof(b), "%.0f%%", v);
+            return std::string(b);
+          };
+
+          // ----- STATIC (nur beim Page-Entry / Force) -----
+          if (!id(ui_static_status) || id(ui_force_redraw)) {
+            it.fill(BG);
+
+            // Header
+            it.filled_rectangle(0, 0, 240, 44, HDR);
+            it.print(10, 12, id(ui_font_m), TXT, "Heizung");
+
+            // Hero
+            it.filled_rectangle(8, 48, 224, 92, HERO);
+            it.rectangle(8, 48, 224, 92, ACCENT);
+            it.print(14, 54, id(ui_font_s), MUTED, "Vorlauf");
+            it.print(14, 122, id(ui_font_s), MUTED, "Soll:");
+            it.print(140, 122, id(ui_font_s), MUTED, "Mischer:");
+
+            // Cards
+            it.filled_rectangle(8, 146, 109, 56, CARD);
+            it.rectangle(8, 146, 109, 56, BORDER);
+            it.print(14, 152, id(ui_font_s), MUTED, "Außen");
+
+            it.filled_rectangle(123, 146, 109, 56, CARD);
+            it.rectangle(123, 146, 109, 56, BORDER);
+            it.print(129, 152, id(ui_font_s), MUTED, "Kessel");
+
+            it.filled_rectangle(8, 208, 109, 56, CARD);
+            it.rectangle(8, 208, 109, 56, BORDER);
+            it.print(14, 214, id(ui_font_s), MUTED, "Warmwasser");
+
+            it.filled_rectangle(123, 208, 109, 56, CARD);
+            it.rectangle(123, 208, 109, 56, BORDER);
+            it.print(129, 214, id(ui_font_s), MUTED, "Rücklauf");
+
+            // Bottom Nav (inkl. Highlight)
+            it.filled_rectangle(0, 268, 240, 52, BG);
+            for (int i=0;i<4;i++) {
+              int x = i*60;
+              bool active = (id(ui_page) == i);
+              it.filled_rectangle(x+2, 272, 56, 44, active ? ACCENT : Color(0x0F,0x17,0x26));
+              it.rectangle(x+2, 272, 56, 44, BORDER);
+            }
+            it.print(12, 288, id(ui_font_s), TXT, "Status");
+            it.print(72, 288, id(ui_font_s), TXT, "Ctrl");
+            it.print(132, 288, id(ui_font_s), TXT, "Pool");
+            it.print(192, 288, id(ui_font_s), TXT, "Sys");
+
+            id(ui_static_status) = true;
+            id(ui_force_redraw) = false;
+          }
+
+          // ----- DYNAMIC (Partial) -----
+          // Header right: clear & draw B/H/W + WiFi
+          it.filled_rectangle(132, 8, 108, 30, HDR);
+
+          const bool br_relay = id(brenner).state;     // <<< dein Brenner-Relay (existiert bei dir)
+          const bool br_bz    = id(brennerbetrieb_bz).state;  // <<< Rückmeldung
+          Color bcol = MUTED;
+          if (br_bz) bcol = RED;
+          else if (br_relay) bcol = YELLOW;
+          it.print(140, 12, id(ui_font_m), bcol, "B");
+
+          const bool hz = id(heizkreispumpe).state;
+          const bool ww = id(warmwasserpumpe).state;
+          it.print(160, 12, id(ui_font_m), hz ? RED : MUTED, "H");
+          it.print(180, 12, id(ui_font_m), ww ? RED : MUTED, "W");
+
+          float rssi = id(ui_wifi_rssi).state;
+          if (std::isfinite(rssi)) {
+            char wb[16]; snprintf(wb, sizeof(wb), "WiFi%.0f", rssi);
+            it.print(198, 14, id(ui_font_s), MUTED, wb);
+          } else {
+            it.print(198, 14, id(ui_font_s), MUTED, "WiFi-");
+          }
+
+          // Hero value
+          it.filled_rectangle(12, 74, 216, 38, HERO);
+          it.print(14, 78, id(ui_font_l), TXT, f1(id(vorlauftemperatur).state).c_str());
+
+          // Soll value
+          it.filled_rectangle(54, 118, 80, 20, HERO);
+          float sp = id(zieltemperatur_input).state;
+          std::string spv = std::isfinite(sp) ? f1(sp) : std::string("-");
+          it.print(54, 122, id(ui_font_s), MUTED, spv.c_str());
+
+          // Mischer value
+          it.filled_rectangle(194, 118, 46, 20, HERO);
+          it.print(194, 122, id(ui_font_s), MUTED, f0pct(id(mischer_position)).c_str());
+
+          // Card values
+          it.filled_rectangle(14, 172, 98, 26, CARD);
+          it.print(14, 176, id(ui_font_m), TXT, f1(id(outdoor).state).c_str());
+
+          it.filled_rectangle(129, 172, 98, 26, CARD);
+          it.print(129, 176, id(ui_font_m), TXT, f1(id(kesseltemperatur).state).c_str());
+
+          it.filled_rectangle(14, 234, 98, 26, CARD);
+          it.print(14, 238, id(ui_font_m), TXT, f1(id(warmwassertemperatur).state).c_str());
+
+          it.filled_rectangle(129, 234, 98, 26, CARD);
+          it.print(129, 238, id(ui_font_m), TXT, f1(id(ruecklauftemperatur).state).c_str());
+
+      # ==========================================================
+      # PAGE 1: CONTROL
+      # ==========================================================
+      - id: page_heat_control
+        lambda: |-
+          const auto BG      = Color(0x07, 0x0B, 0x12);
+          const auto HDR     = Color(0x0B, 0x12, 0x20);
+          const auto CARD    = Color(0x0B, 0x14, 0x24);
+          const auto ACCENT  = Color(0x2B, 0x6F, 0xFF);
+          const auto TXT     = Color(0xE7, 0xEE, 0xF9);
+          const auto MUTED   = Color(0x9F, 0xB0, 0xC8);
+          const auto RED     = Color(0xFF, 0x3B, 0x30);
+          const auto YELLOW  = Color(0xFF, 0xCC, 0x00);
+          const auto BORDER  = Color(0x22, 0x32, 0x4B);
+
+          auto f1 = [&](float v)->std::string {
+            if (!std::isfinite(v)) return std::string("-");
+            char b[16]; snprintf(b, sizeof(b), "%.1f°C", v);
+            return std::string(b);
+          };
+
+          const std::string m = id(heizmodus_select).state;
+
+          if (!id(ui_static_control) || id(ui_force_redraw)) {
+            it.fill(BG);
+
+            it.filled_rectangle(0, 0, 240, 44, HDR);
+            it.print(10, 12, id(ui_font_m), TXT, "Control");
+
+            // Mode card
+            it.filled_rectangle(8, 48, 224, 78, CARD);
+            it.rectangle(8, 48, 224, 78, BORDER);
+            it.print(14, 54, id(ui_font_s), MUTED, "Heizmodus");
+
+            // Setpoint cards
+            it.filled_rectangle(8, 132, 224, 70, CARD);
+            it.rectangle(8, 132, 224, 70, BORDER);
+            it.print(14, 138, id(ui_font_s), MUTED, "Vorlauf Soll");
+
+            it.filled_rectangle(8, 208, 224, 60, CARD);
+            it.rectangle(8, 208, 224, 60, BORDER);
+            it.print(14, 214, id(ui_font_s), MUTED, "WW Soll");
+
+            // +/- frames (static) + symbols
+            int x_minus = 240-8-56-56-8;
+            int x_plus  = 240-8-56;
+
+            it.filled_rectangle(x_minus, 150, 56, 44, Color(0x0F,0x17,0x26));
+            it.rectangle(x_minus, 150, 56, 44, BORDER);
+            it.print(x_minus+23, 158, id(ui_font_l), TXT, "-");
+
+            it.filled_rectangle(x_plus, 150, 56, 44, Color(0x0F,0x17,0x26));
+            it.rectangle(x_plus, 150, 56, 44, BORDER);
+            it.print(x_plus+18, 158, id(ui_font_l), TXT, "+");
+
+            it.filled_rectangle(x_minus, 220, 56, 44, Color(0x0F,0x17,0x26));
+            it.rectangle(x_minus, 220, 56, 44, BORDER);
+            it.print(x_minus+23, 228, id(ui_font_l), TXT, "-");
+
+            it.filled_rectangle(x_plus, 220, 56, 44, Color(0x0F,0x17,0x26));
+            it.rectangle(x_plus, 220, 56, 44, BORDER);
+            it.print(x_plus+18, 228, id(ui_font_l), TXT, "+");
+
+            // Bottom nav
+            it.filled_rectangle(0, 268, 240, 52, BG);
+            for (int i=0;i<4;i++) {
+              int x = i*60;
+              bool active = (id(ui_page) == i);
+              it.filled_rectangle(x+2, 272, 56, 44, active ? ACCENT : Color(0x0F,0x17,0x26));
+              it.rectangle(x+2, 272, 56, 44, BORDER);
+            }
+            it.print(12, 288, id(ui_font_s), TXT, "Status");
+            it.print(72, 288, id(ui_font_s), TXT, "Ctrl");
+            it.print(132, 288, id(ui_font_s), TXT, "Pool");
+            it.print(192, 288, id(ui_font_s), TXT, "Sys");
+
+            id(ui_static_control) = true;
+            id(ui_force_redraw) = false;
+          }
+
+          // Header right chips
+          it.filled_rectangle(132, 8, 108, 30, HDR);
+
+          const bool br_relay = id(brenner).state;
+          const bool br_bz    = id(brennerbetrieb_bz).state;
+          Color bcol = MUTED;
+          if (br_bz) bcol = RED;
+          else if (br_relay) bcol = YELLOW;
+          it.print(140, 12, id(ui_font_m), bcol, "B");
+
+          const bool hz = id(heizkreispumpe).state;
+          const bool ww = id(warmwasserpumpe).state;
+          it.print(160, 12, id(ui_font_m), hz ? RED : MUTED, "H");
+          it.print(180, 12, id(ui_font_m), ww ? RED : MUTED, "W");
+
+          // Mode buttons (dynamic highlight)
+          struct Btn { int x,w; const char* txt; const char* opt; };
+          Btn b[4] = {{8,52,"Auto","auto"},{66,52,"Som","summer"},{124,52,"Win","winter"},{182,50,"Pool","pool"}};
+          for (int i=0;i<4;i++){
+            bool act = (m == b[i].opt);
+            it.filled_rectangle(b[i].x, 74, b[i].w, 44, act ? ACCENT : Color(0x0F,0x17,0x26));
+            it.rectangle(b[i].x, 74, b[i].w, 44, BORDER);
+            it.print(b[i].x + 12, 90, id(ui_font_m), TXT, b[i].txt);
+          }
+
+          // Setpoint values
+          it.filled_rectangle(14, 156, 110, 38, CARD);
+          it.print(14, 160, id(ui_font_l), TXT, f1(id(zieltemperatur_input).state).c_str());
+
+          it.filled_rectangle(14, 226, 110, 38, CARD);
+          it.print(14, 232, id(ui_font_l), TXT, f1(id(warmwasser_zieltemperatur_input).state).c_str());
+
+      # ==========================================================
+      # PAGE 2: POOL
+      # ==========================================================
+      - id: page_pool
+        lambda: |-
+          const auto BG      = Color(0x07, 0x0B, 0x12);
+          const auto HDR     = Color(0x0B, 0x12, 0x20);
+          const auto CARD    = Color(0x0B, 0x14, 0x24);
+          const auto ACCENT  = Color(0x2B, 0x6F, 0xFF);
+          const auto TXT     = Color(0xE7, 0xEE, 0xF9);
+          const auto MUTED   = Color(0x9F, 0xB0, 0xC8);
+          const auto RED     = Color(0xFF, 0x3B, 0x30);
+          const auto YELLOW  = Color(0xFF, 0xCC, 0x00);
+          const auto BORDER  = Color(0x22, 0x32, 0x4B);
+
+          auto onoff = [&](bool s)->const char* { return s ? "EIN" : "AUS"; };
+
+          if (!id(ui_static_pool) || id(ui_force_redraw)) {
+            it.fill(BG);
+
+            it.filled_rectangle(0, 0, 240, 44, HDR);
+            it.print(10, 12, id(ui_font_m), TXT, "Pool");
+
+            // Filter card
+            it.filled_rectangle(8, 48, 224, 104, CARD);
+            it.rectangle(8, 48, 224, 104, BORDER);
+            it.print(14, 54, id(ui_font_s), MUTED, "Filterpumpe");
+            it.print(14, 76, id(ui_font_s), MUTED, "Status:");
+            it.print(14, 98, id(ui_font_s), MUTED, "Speed:");
+
+            // Buttons
+            it.filled_rectangle(8,   108, 68, 44, Color(0x0F,0x17,0x26));
+            it.rectangle(8,   108, 68, 44, BORDER);
+            it.print(18, 122, id(ui_font_m), TXT, "Tgl");
+
+            it.filled_rectangle(86,  108, 68, 44, Color(0x0F,0x17,0x26));
+            it.rectangle(86,  108, 68, 44, BORDER);
+            it.print(98, 122, id(ui_font_m), TXT, "-5%");
+
+            it.filled_rectangle(164, 108, 68, 44, Color(0x0F,0x17,0x26));
+            it.rectangle(164, 108, 68, 44, BORDER);
+            it.print(176, 122, id(ui_font_m), TXT, "+5%");
+
+            // Dosierung card
+            it.filled_rectangle(8, 158, 224, 108, CARD);
+            it.rectangle(8, 158, 224, 108, BORDER);
+            it.print(14, 164, id(ui_font_s), MUTED, "Dosierung");
+            it.print(14, 188, id(ui_font_s), MUTED, "Status:");
+
+            it.filled_rectangle(8, 222, 224, 44, ACCENT);
+            it.rectangle(8, 222, 224, 44, BORDER);
+            it.print(90, 236, id(ui_font_m), TXT, "Toggle");
+
+            // Bottom nav
+            it.filled_rectangle(0, 268, 240, 52, BG);
+            for (int i=0;i<4;i++) {
+              int x = i*60;
+              bool active = (id(ui_page) == i);
+              it.filled_rectangle(x+2, 272, 56, 44, active ? ACCENT : Color(0x0F,0x17,0x26));
+              it.rectangle(x+2, 272, 56, 44, BORDER);
+            }
+            it.print(12, 288, id(ui_font_s), TXT, "Status");
+            it.print(72, 288, id(ui_font_s), TXT, "Ctrl");
+            it.print(132, 288, id(ui_font_s), TXT, "Pool");
+            it.print(192, 288, id(ui_font_s), TXT, "Sys");
+
+            id(ui_static_pool) = true;
+            id(ui_force_redraw) = false;
+          }
+
+          // Header chips
+          it.filled_rectangle(132, 8, 108, 30, HDR);
+
+          const bool br_relay = id(brenner).state;
+          const bool br_bz    = id(brennerbetrieb_bz).state;
+          Color bcol = MUTED;
+          if (br_bz) bcol = RED;
+          else if (br_relay) bcol = YELLOW;
+          it.print(140, 12, id(ui_font_m), bcol, "B");
+
+          const bool hz = id(heizkreispumpe).state;
+          const bool ww = id(warmwasserpumpe).state;
+          it.print(160, 12, id(ui_font_m), hz ? RED : MUTED, "H");
+          it.print(180, 12, id(ui_font_m), ww ? RED : MUTED, "W");
+
+          // Filter values
+          it.filled_rectangle(80, 72, 120, 22, CARD);
+          it.print(80, 76, id(ui_font_m), TXT, onoff(id(filter_pumpe_enable_dac).state));
+
+          it.filled_rectangle(80, 94, 120, 22, CARD);
+          float v = id(filter_pumpe_speed_pct).state;
+          if (std::isfinite(v)) {
+            char b[12]; snprintf(b, sizeof(b), "%.0f%%", v);
+            it.print(80, 98, id(ui_font_m), TXT, b);
+          } else {
+            it.print(80, 98, id(ui_font_m), TXT, "-");
+          }
+
+          it.filled_rectangle(80, 184, 120, 22, CARD);
+          it.print(80, 188, id(ui_font_m), TXT, onoff(id(dosierung_enable).state));
+
+      # ==========================================================
+      # PAGE 3: SYSTEM
+      # ==========================================================
+      - id: page_system
+        lambda: |-
+          const auto BG      = Color(0x07, 0x0B, 0x12);
+          const auto HDR     = Color(0x0B, 0x12, 0x20);
+          const auto CARD    = Color(0x0B, 0x14, 0x24);
+          const auto ACCENT  = Color(0x2B, 0x6F, 0xFF);
+          const auto TXT     = Color(0xE7, 0xEE, 0xF9);
+          const auto MUTED   = Color(0x9F, 0xB0, 0xC8);
+          const auto RED     = Color(0xFF, 0x3B, 0x30);
+          const auto YELLOW  = Color(0xFF, 0xCC, 0x00);
+          const auto BORDER  = Color(0x22, 0x32, 0x4B);
+
+          if (!id(ui_static_system) || id(ui_force_redraw)) {
+            it.fill(BG);
+
+            it.filled_rectangle(0, 0, 240, 44, HDR);
+            it.print(10, 12, id(ui_font_m), TXT, "System");
+
+            auto card = [&](int x,int y,const char* t){
+              it.filled_rectangle(x, y, 109, 56, CARD);
+              it.rectangle(x, y, 109, 56, BORDER);
+              it.print(x+6, y+6, id(ui_font_s), MUTED, t);
+            };
+            card(8, 48,  "Uptime");
+            card(123, 48,"Loop c/m");
+            card(8, 110, "Heap");
+            card(123,110,"IP");
+
+            it.filled_rectangle(8, 172, 224, 54, CARD);
+            it.rectangle(8, 172, 224, 54, BORDER);
+            it.print(14, 178, id(ui_font_s), MUTED, "Reset Reason");
+
+            it.filled_rectangle(8, 232, 224, 34, ACCENT);
+            it.rectangle(8, 232, 224, 34, BORDER);
+            it.print(92, 240, id(ui_font_m), TXT, "Restart");
+
+            // Bottom nav
+            it.filled_rectangle(0, 268, 240, 52, BG);
+            for (int i=0;i<4;i++) {
+              int x = i*60;
+              bool active = (id(ui_page) == i);
+              it.filled_rectangle(x+2, 272, 56, 44, active ? ACCENT : Color(0x0F,0x17,0x26));
+              it.rectangle(x+2, 272, 56, 44, BORDER);
+            }
+            it.print(12, 288, id(ui_font_s), TXT, "Status");
+            it.print(72, 288, id(ui_font_s), TXT, "Ctrl");
+            it.print(132, 288, id(ui_font_s), TXT, "Pool");
+            it.print(192, 288, id(ui_font_s), TXT, "Sys");
+
+            id(ui_static_system) = true;
+            id(ui_force_redraw) = false;
+          }
+
+          // Header chips
+          it.filled_rectangle(132, 8, 108, 30, HDR);
+
+          const bool br_relay = id(brenner).state;
+          const bool br_bz    = id(brennerbetrieb_bz).state;
+          Color bcol = MUTED;
+          if (br_bz) bcol = RED;
+          else if (br_relay) bcol = YELLOW;
+          it.print(140, 12, id(ui_font_m), bcol, "B");
+
+          const bool hz = id(heizkreispumpe).state;
+          const bool ww = id(warmwasserpumpe).state;
+          it.print(160, 12, id(ui_font_m), hz ? RED : MUTED, "H");
+          it.print(180, 12, id(ui_font_m), ww ? RED : MUTED, "W");
+
+          // Values (partial clears)
+          it.filled_rectangle(14, 70, 100, 30, CARD);
+          float up = id(ui_uptime_s).state;
+          if (std::isfinite(up) && up >= 0) {
+            uint32_t s = (uint32_t) up;
+            uint32_t d=s/86400; s%=86400;
+            uint32_t h=s/3600;  s%=3600;
+            uint32_t m=s/60;    s%=60;
+            char b[24];
+            snprintf(b, sizeof(b), "%ud %02u:%02u:%02u",(unsigned)d,(unsigned)h,(unsigned)m,(unsigned)s);
+            it.print(14, 74, id(ui_font_m), TXT, b);
+          } else {
+            it.print(14, 74, id(ui_font_m), TXT, "-");
+          }
+
+          it.filled_rectangle(129, 70, 100, 30, CARD);
+          float cur = id(dbg_loop_time).state;
+          float mx  = id(dbg_loop_time_max_boot).state;
+          if (std::isfinite(cur) && std::isfinite(mx)) {
+            char b[20]; snprintf(b, sizeof(b), "%.0f/%.0f ms", cur, mx);
+            it.print(129, 74, id(ui_font_m), TXT, b);
+          } else {
+            it.print(129, 74, id(ui_font_m), TXT, "-");
+          }
+
+          it.filled_rectangle(14, 132, 100, 30, CARD);
+          float kb = id(dbg_heap_free_kb).state;
+          if (std::isfinite(kb)) {
+            char b[16]; snprintf(b, sizeof(b), "%.0f KB", kb);
+            it.print(14, 136, id(ui_font_m), TXT, b);
+          } else {
+            it.print(14, 136, id(ui_font_m), TXT, "-");
+          }
+
+          it.filled_rectangle(129, 132, 100, 30, CARD);
+          if (WiFi.isConnected()) {
+            auto ip = WiFi.localIP();
+            char b[20]; snprintf(b, sizeof(b), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+            it.print(129, 138, id(ui_font_s), TXT, b);
+          } else {
+            it.print(129, 136, id(ui_font_m), TXT, "-");
+          }
+
+          it.filled_rectangle(14, 196, 210, 24, CARD);
+          esp_reset_reason_t rr = esp_reset_reason();
+          const char* rs = "UNKNOWN";
+          switch (rr) {
+            case ESP_RST_POWERON:   rs = "POWERON"; break;
+            case ESP_RST_SW:        rs = "SW"; break;
+            case ESP_RST_PANIC:     rs = "PANIC"; break;
+            case ESP_RST_INT_WDT:   rs = "INT_WDT"; break;
+            case ESP_RST_TASK_WDT:  rs = "TASK_WDT"; break;
+            case ESP_RST_WDT:       rs = "WDT"; break;
+            case ESP_RST_DEEPSLEEP: rs = "DEEPSLEEP"; break;
+            case ESP_RST_BROWNOUT:  rs = "BROWNOUT"; break;
+            default: break;
+          }
+          it.print(14, 198, id(ui_font_m), TXT, rs);
+
+touchscreen:
+  - platform: xpt2046
+    id: touch
+    spi_id: spi_touch
+    cs_pin: GPIO38
+    interrupt_pin:
+      number: GPIO47
+      mode: INPUT_PULLUP
+    display: tft
+    update_interval: 200ms
+    threshold: 400
+    calibration:
+      x_min: 392
+      x_max: 3725
+      y_min: 423
+      y_max: 3791
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: true
+
+sensor:
+  - platform: uptime
+    id: ui_uptime_s
+    update_interval: 10s
+    internal: true
+
+  - platform: wifi_signal
+    id: ui_wifi_rssi
+    update_interval: 10s
+    internal: true
+
+interval:
+  # Fast refresh nur wenn User gerade aktiv war (15s Fenster)
+  - interval: 5s
+    startup_delay: 2s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(ui_ready) && (millis() - id(ui_last_touch_ms) < 15000);'
+          then:
+            - script.execute: ui_refresh_fast
+
+  # Slow refresh immer, aber selten
+  - interval: 30s
+    startup_delay: 9s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(ui_ready);'
+          then:
+            - script.execute: ui_refresh_fast
+
+script:
+  - id: ui_show_current_page
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(ui_ready);'
+          then:
+            - lambda: 'return;'
+      - lambda: |-
+          if (id(ui_page) < 0) id(ui_page) = 0;
+          if (id(ui_page) > 3) id(ui_page) = 3;
+
+          // Force static redraw on current page entry
+          if (id(ui_page) == 0) id(ui_static_status) = false;
+          if (id(ui_page) == 1) id(ui_static_control) = false;
+          if (id(ui_page) == 2) id(ui_static_pool)   = false;
+          if (id(ui_page) == 3) id(ui_static_system) = false;
+
+          id(ui_force_redraw) = true;
+      - if:
+          condition:
+            lambda: 'return id(ui_page) == 0;'
+          then:
+            - display.page.show: page_heat_status
+      - if:
+          condition:
+            lambda: 'return id(ui_page) == 1;'
+          then:
+            - display.page.show: page_heat_control
+      - if:
+          condition:
+            lambda: 'return id(ui_page) == 2;'
+          then:
+            - display.page.show: page_pool
+      - if:
+          condition:
+            lambda: 'return id(ui_page) == 3;'
+          then:
+            - display.page.show: page_system
+      - delay: 10ms
+      - script.execute: ui_refresh_fast
+
+  - id: ui_refresh_fast
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(ui_ready) || id(ui_busy);'
+          then:
+            - lambda: 'return;'
+          else:
+            - lambda: 'id(ui_busy) = true;'
+
+      - lambda: |-
+          auto chg = [&](float &last, float cur, float eps)->bool{
+            const bool cfin = std::isfinite(cur);
+            const bool lfin = std::isfinite(last);
+            if (!cfin && !lfin) return false;
+            if (cfin != lfin) { last = cur; return true; }
+            if (fabsf(cur - last) >= eps) { last = cur; return true; }
+            return false;
+          };
+
+          bool d = false;
+          const int p = id(ui_page);
+
+          // mode
+          int new_mode = -1;
+          const std::string m = id(heizmodus_select).state;
+          if      (m == "auto")   new_mode = 0;
+          else if (m == "summer") new_mode = 1;
+          else if (m == "winter") new_mode = 2;
+          else if (m == "pool")   new_mode = 3;
+          if (new_mode != id(ui_last_mode)) { id(ui_last_mode) = new_mode; d = true; }
+
+          // pumps
+          const float phz = id(heizkreispumpe).state ? 1.0f : 0.0f;
+          const float pww = id(warmwasserpumpe).state ? 1.0f : 0.0f;
+          d |= chg(id(ui_last_pump_hz), phz, 0.5f);
+          d |= chg(id(ui_last_pump_ww), pww, 0.5f);
+
+          // burner
+          const float br_relay = id(brenner).state ? 1.0f : 0.0f;
+          const float br_bz    = id(brennerbetrieb_bz).state ? 1.0f : 0.0f;
+          d |= chg(id(ui_last_burner_relay), br_relay, 0.5f);
+          d |= chg(id(ui_last_burner_bz),    br_bz,    0.5f);
+
+          // wifi
+          d |= chg(id(ui_last_wifi), id(ui_wifi_rssi).state, 1.0f);
+
+          // page-specific values
+          if (p == 0) {
+            d |= chg(id(ui_last_vl),     id(vorlauftemperatur).state,    0.1f);
+            d |= chg(id(ui_last_kessel), id(kesseltemperatur).state,     0.1f);
+            d |= chg(id(ui_last_rl),     id(ruecklauftemperatur).state,  0.1f);
+            d |= chg(id(ui_last_ww),     id(warmwassertemperatur).state, 0.1f);
+            d |= chg(id(ui_last_out),    id(outdoor).state,              0.1f);
+            d |= chg(id(ui_last_mixer),  id(mischer_position),           1.0f);
+            d |= chg(id(ui_last_sp_vl),  id(zieltemperatur_input).state, 0.1f);
+          } else if (p == 1) {
+            d |= chg(id(ui_last_sp_vl),  id(zieltemperatur_input).state,            0.1f);
+            d |= chg(id(ui_last_sp_ww),  id(warmwasser_zieltemperatur_input).state, 0.1f);
+          } else if (p == 2) {
+            const float fp = id(filter_pumpe_enable_dac).state ? 1.0f : 0.0f;
+            const float ds = id(dosierung_enable).state ? 1.0f : 0.0f;
+            d |= chg(id(ui_last_pool_fp), fp, 0.5f);
+            d |= chg(id(ui_last_pool_dos), ds, 0.5f);
+            d |= chg(id(ui_last_pool_speed), id(filter_pumpe_speed_pct).state, 1.0f);
+          } else if (p == 3) {
+            // System: immer redrawen wenn auf Seite (damit Uptime/Reset/Loop aktuell bleibt)
+            d = true;
+          }
+
+          if (id(ui_force_redraw)) d = true;
+
+          if (!d) { id(ui_busy) = false; return; }
+
+      - component.update: tft
+      - lambda: 'id(ui_busy) = false;'
+
+binary_sensor:
+  # Bottom Nav
+  - platform: touchscreen
+    id: nav_status
+    x_min: 0
+    x_max: 59
+    y_min: 268
+    y_max: 319
+    on_press:
+      then:
+        - lambda: |-
+            id(ui_last_touch_ms) = millis();
+            id(ui_page) = 0;
+        - script.execute: ui_show_current_page
+
+  - platform: touchscreen
+    id: nav_control
+    x_min: 60
+    x_max: 119
+    y_min: 268
+    y_max: 319
+    on_press:
+      then:
+        - lambda: |-
+            id(ui_last_touch_ms) = millis();
+            id(ui_page) = 1;
+        - script.execute: ui_show_current_page
+
+  - platform: touchscreen
+    id: nav_pool
+    x_min: 120
+    x_max: 179
+    y_min: 268
+    y_max: 319
+    on_press:
+      then:
+        - lambda: |-
+            id(ui_last_touch_ms) = millis();
+            id(ui_page) = 2;
+        - script.execute: ui_show_current_page
+
+  - platform: touchscreen
+    id: nav_system
+    x_min: 180
+    x_max: 239
+    y_min: 268
+    y_max: 319
+    on_press:
+      then:
+        - lambda: |-
+            id(ui_last_touch_ms) = millis();
+            id(ui_page) = 3;
+        - script.execute: ui_show_current_page
+
+  # CONTROL: Mode Buttons
+  - platform: touchscreen
+    id: t_mode_auto
+    x_min: 8
+    x_max: 59
+    y_min: 74
+    y_max: 117
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - select.set: { id: heizmodus_select, option: "auto" }
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_mode_summer
+    x_min: 66
+    x_max: 117
+    y_min: 74
+    y_max: 117
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - select.set: { id: heizmodus_select, option: "summer" }
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_mode_winter
+    x_min: 124
+    x_max: 175
+    y_min: 74
+    y_max: 117
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - select.set: { id: heizmodus_select, option: "winter" }
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_mode_pool
+    x_min: 182
+    x_max: 232
+    y_min: 74
+    y_max: 117
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - select.set: { id: heizmodus_select, option: "pool" }
+              - script.execute: ui_refresh_fast
+
+  # CONTROL: Vorlauf Soll -/+
+  - platform: touchscreen
+    id: t_vl_minus
+    x_min: 120
+    x_max: 175
+    y_min: 150
+    y_max: 193
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - script.execute: { id: ui_vl_nudge, delta: -0.5 }
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_vl_plus
+    x_min: 176
+    x_max: 239
+    y_min: 150
+    y_max: 193
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - script.execute: { id: ui_vl_nudge, delta: 0.5 }
+              - script.execute: ui_refresh_fast
+
+  # CONTROL: WW Soll -/+
+  - platform: touchscreen
+    id: t_ww_minus
+    x_min: 120
+    x_max: 175
+    y_min: 220
+    y_max: 267
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - script.execute: { id: ui_ww_nudge, delta: -0.5 }
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_ww_plus
+    x_min: 176
+    x_max: 239
+    y_min: 220
+    y_max: 267
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 1;'
+            then:
+              - script.execute: { id: ui_ww_nudge, delta: 0.5 }
+              - script.execute: ui_refresh_fast
+
+  # POOL Buttons
+  - platform: touchscreen
+    id: t_pool_toggle_fp
+    x_min: 8
+    x_max: 75
+    y_min: 108
+    y_max: 151
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 2;'
+            then:
+              - script.execute: ui_toggle_filterpump
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_pool_speed_minus
+    x_min: 86
+    x_max: 153
+    y_min: 108
+    y_max: 151
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 2;'
+            then:
+              - script.execute: { id: ui_filterpump_speed_nudge, delta: -5 }
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_pool_speed_plus
+    x_min: 164
+    x_max: 231
+    y_min: 108
+    y_max: 151
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 2;'
+            then:
+              - script.execute: { id: ui_filterpump_speed_nudge, delta: 5 }
+              - script.execute: ui_refresh_fast
+
+  - platform: touchscreen
+    id: t_pool_toggle_dos
+    x_min: 8
+    x_max: 232
+    y_min: 222
+    y_max: 267
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 2;'
+            then:
+              - script.execute: ui_toggle_dosierung
+              - script.execute: ui_refresh_fast
+
+  # SYSTEM: Restart
+  - platform: touchscreen
+    id: t_sys_restart
+    x_min: 8
+    x_max: 232
+    y_min: 232
+    y_max: 266
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_page) == 3;'
+            then:
+              - button.press: restart_button

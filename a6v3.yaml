@@ -2,10 +2,10 @@ substitutions:
   fw_version: "0.9.0"
 
 esphome:
-  name: a6v3_2
-  friendly_name: a6v3_2
+  name: a6v3
+  friendly_name: a6v3
   includes:
-    - webui.h        # Enthält dein eigenes HTML-UI
+    - wdt.h
   project:
     name: "kc868.a6-heizung"
     version: "${fw_version}"
@@ -17,7 +17,46 @@ esphome:
 #    build_flags:
 #      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Wire/src
 #      - -I$PROJECT_PACKAGES_DIR/framework-arduinoespressif32/libraries/Network/src
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          esp_task_wdt_config_t cfg = {
+            .timeout_ms = 20000,
+            .idle_core_mask = 0x3,
+            .trigger_panic = true,
+          };
+          esp_err_t err = esp_task_wdt_init(&cfg);
+          if (err == ESP_OK) {
+            ESP_LOGI("BOOT", "TWDT init ok");
+          } else if (err == ESP_ERR_INVALID_STATE) {
+            ESP_LOGW("BOOT", "TWDT already initialized");
+          } else {
+            ESP_LOGW("BOOT", "TWDT init failed: %d", (int) err);
+          }
+          if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+            esp_task_wdt_add(NULL);
+          }
+          id(boot_count) += 1;
 
+          esp_reset_reason_t rr = esp_reset_reason();
+          const char* rs = "UNKNOWN";
+          switch (rr) {
+            case ESP_RST_POWERON:   rs = "POWERON"; break;
+            case ESP_RST_SW:        rs = "SW"; break;
+            case ESP_RST_PANIC:     rs = "PANIC"; break;
+            case ESP_RST_INT_WDT:   rs = "INT_WDT"; break;
+            case ESP_RST_TASK_WDT:  rs = "TASK_WDT"; break;
+            case ESP_RST_WDT:       rs = "WDT"; break;
+            case ESP_RST_DEEPSLEEP: rs = "DEEPSLEEP"; break;
+            case ESP_RST_BROWNOUT:  rs = "BROWNOUT"; break;
+            default: break;
+          }
+
+          ESP_LOGW("BOOT", "BootCount=%lu ResetReason=%s (%d) Build=%s %s",
+                   (unsigned long) id(boot_count),
+                   rs, (int) rr,
+                   __DATE__, __TIME__);
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -44,17 +83,19 @@ web_server:
 
 # Logger (Debug für Tests)
 logger:
-  level: WARN
+  level: INFO
   logs:
-    preferences: WARN
+    lvgl: WARN
     component: WARN
     wifi: WARN
     mqtt: WARN
-
+    modbus: INFO
+    modbus_controller: INFO
 
 
 # Home Assistant / API Verbindung
 api:
+  reboot_timeout: 0s
   password: ""
   services:
     - service: set_zieltemperatur
@@ -79,20 +120,89 @@ captive_portal:
 packages:
   heizung: !include heizung.yaml
   pool: !include pool.yaml
+  ssd1306: !include ssd1306.yaml
+#  ui_touch_display: !include ui_touch_display.yaml
+#  ui_lvgl-lite: !include ui_lvgl-lite.yaml
+#  ui_display_menu: !include ui_display_menu.yaml
+#  ui_text: !include ui_text.yaml
 
 debug:
   update_interval: 10s
 
-text_sensor:
-  - platform: debug
-    reset_reason:
-      name: "Reset reason"
-sensor:
-  - platform: uptime
-    name: "A6 Uptime"
+globals:
+  - id: dbg_loop_time_max_ever
+    type: float
+    restore_value: no
+    initial_value: "0"
+  - id: boot_count
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
 
+sensor:
+  # ESPHome Debug-Sensoren (loop_time ist der Max seit letztem update_interval)
   - platform: debug
-    free:
-      name: "A6 Heap Free"
     loop_time:
-      name: "A6 Loop Time"
+      name: "Loop Time (max/5s)"
+      id: dbg_loop_time
+      on_value:
+        then:
+          - lambda: |-
+              if (isfinite(x) && x > id(dbg_loop_time_max_ever)) {
+                id(dbg_loop_time_max_ever) = x;
+              }
+    free:
+      name: "Heap Free (bytes)"
+      id: dbg_heap_free_bytes
+
+  # Max seit Boot als eigener Sensor (für UI/HA)
+  - platform: template
+    name: "Loop Time Max (boot)"
+    id: dbg_loop_time_max_boot
+    unit_of_measurement: "ms"
+    accuracy_decimals: 0
+    lambda: |-
+      return id(dbg_loop_time_max_ever);
+    update_interval: 5s
+
+  # Heap in KB (optional, damit UI einfacher wird)
+  - platform: template
+    name: "Heap Free"
+    id: dbg_heap_free_kb
+    unit_of_measurement: "KB"
+    accuracy_decimals: 0
+    lambda: |-
+      if (!isfinite(id(dbg_heap_free_bytes).state)) return NAN;
+      return id(dbg_heap_free_bytes).state / 1024.0f;
+    update_interval: 5s
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          esp_reset_reason_t rr = esp_reset_reason();
+          const char* rs = "UNKNOWN";
+          switch (rr) {
+            case ESP_RST_UNKNOWN:    rs = "UNKNOWN"; break;
+            case ESP_RST_POWERON:    rs = "POWERON"; break;
+            case ESP_RST_EXT:        rs = "EXT"; break;
+            case ESP_RST_SW:         rs = "SW"; break;
+            case ESP_RST_PANIC:      rs = "PANIC"; break;
+            case ESP_RST_INT_WDT:    rs = "INT_WDT"; break;
+            case ESP_RST_TASK_WDT:   rs = "TASK_WDT"; break;
+            case ESP_RST_WDT:        rs = "WDT"; break;
+            case ESP_RST_DEEPSLEEP:  rs = "DEEPSLEEP"; break;
+            case ESP_RST_BROWNOUT:   rs = "BROWNOUT"; break;
+            case ESP_RST_SDIO:       rs = "SDIO"; break;
+            case ESP_RST_USB:        rs = "USB"; break;        // <- das ist dein (11)
+            case ESP_RST_JTAG:       rs = "JTAG"; break;
+            case ESP_RST_EFUSE:      rs = "EFUSE"; break;
+            case ESP_RST_PWR_GLITCH: rs = "PWR_GLITCH"; break;
+            case ESP_RST_CPU_LOCKUP: rs = "CPU_LOCKUP"; break;
+            default: break;
+          }
+
+          ESP_LOGI("HB", "alive boot_count=%lu reset=%s uptime=%lus heap=%uB",
+                   (unsigned long) id(boot_count),
+                   rs,
+                   (unsigned long) (millis() / 1000UL),
+                   (unsigned) ESP.getFreeHeap());

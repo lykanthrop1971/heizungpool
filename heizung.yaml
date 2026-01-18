@@ -1,6 +1,9 @@
+substitutions:
+  mb_addr2_interval: 11s
+  mb_addr3_interval: 13s
+  mb_addr101_interval: 24h
+
 esphome:
-  includes:
-    - webui.h   # <— hier unser eigenes Web-UI  
   on_boot:
     priority: 600
     then:
@@ -80,25 +83,11 @@ esphome:
           id(kessel_hysterese_num).publish_state(hv);
           ESP_LOGI("Boot","Hysterese restored/synced: %.1f K", hv);
       - delay: 7s
-      - lambda: |-
-          register_heizungs_ui();
-          ESP_LOGI("heizui", "Custom Web-UI nach Boot registriert");
           
 external_components:
   - source:
       type: local
       path: ./components
-
-#web_server:
-#  port: 80
-#  auth:
-#    username: admin
-#    password: heizung123
-
-#  include_internal: true
-#  local: true
-#  css_include: webserver.css
-#  js_include: webserver.js
 
 spi:
   # TFT
@@ -137,15 +126,7 @@ font:
   - file: "gfonts://Roboto"
     id: font_big
     size: 12
-  - file: "gfonts://Roboto"
-    id: tft_font_big
-    size: 26
-  - file: "gfonts://Roboto"
-    id: tft_font_med
-    size: 18
-  - file: "gfonts://Roboto"
-    id: tft_font_small
-    size: 14
+
 uart:
   - id: uart_rs485
     tx_pin: 17
@@ -161,31 +142,31 @@ modbus:
 
 modbus_controller:
   # --- Main / fast controller (keep stable, reduce retry-storms) ---
-  - id: mb_ctrl
-    address: 1
-    modbus_id: modbus_bus
-    setup_priority: -10
-    update_interval: 11s
-    command_throttle: 600ms
-    max_cmd_retries: 0
-    offline_skip_updates: 30
+  # - id: mb_ctrl
+  #   address: 1
+  #   modbus_id: modbus_bus
+  #   setup_priority: -10
+  #   update_interval: 11s
+  #   command_throttle: 600ms
+  #   max_cmd_retries: 0
+  #   offline_skip_updates: 30
 
   # --- TUF2000: can block hard when it misses replies -> do not retry, skip longer when offline ---
   - id: tuf2000m
     address: 2
     modbus_id: modbus_bus
-    update_interval: 17s
+    update_interval: ${mb_addr2_interval}
     command_throttle: 800ms
-    max_cmd_retries: 0
-    offline_skip_updates: 60
+    max_cmd_retries: 1
+    offline_skip_updates: 30
 
   - id: tuf2000b
     address: 3
     modbus_id: modbus_bus
-    update_interval: 13s
+    update_interval: ${mb_addr3_interval}
     command_throttle: 800ms
-    max_cmd_retries: 0
-    offline_skip_updates: 60
+    max_cmd_retries: 1
+    offline_skip_updates: 30
 
   # --- PTA8C04: moderate pace, limited retries ---
   # - id: pta8c04
@@ -198,24 +179,24 @@ modbus_controller:
   #   offline_skip_updates: 30
 
   # --- NT18B07: your fast temperature source; keep it quick but avoid retry bursts ---
-  - id: nt18b07
-    address: 100          # RS485-Adresse des NT18B07
+  # - id: nt18b07
+  #   address: 100          # RS485-Adresse des NT18B07
+  #   modbus_id: modbus_bus
+  #   setup_priority: -10
+  #   update_interval: 3s
+  #   command_throttle: 250ms
+  #   max_cmd_retries: 0
+  #   offline_skip_updates: 20
+
+  # --- NT48A08: slower scan, limited retries ---
+  - id: nt48a08
+    address: 32               # RS485 Slave-ID des NT48A08
     modbus_id: modbus_bus
     setup_priority: -10
     update_interval: 3s
-    command_throttle: 250ms
-    max_cmd_retries: 0
-    offline_skip_updates: 20
-
-  # --- NT48A08: slower scan, limited retries ---
-  # - id: nt48a08
-  #   address: 32               # RS485 Slave-ID des NT48A08
-  #   modbus_id: modbus_bus
-  #   setup_priority: -10
-  #   update_interval: 15s
-  #   command_throttle: 600ms
-  #   max_cmd_retries: 0
-  #   offline_skip_updates: 30
+    command_throttle: 600ms
+    max_cmd_retries: 1
+    offline_skip_updates: 30
  
 
 gp8403:
@@ -232,443 +213,8 @@ output:
     gp8403_id: my_gp8403
     channel: 1
 
-display:
-  - platform: ili9xxx
-    id: tft
-    model: ili9341
-    spi_id: spi_tft
-    cs_pin: GPIO8
-    dc_pin: GPIO48
-    reset_pin: GPIO14
-    invert_colors: false
-    data_rate: 10MHz
-    color_palette: 8BIT
-    update_interval: 250ms
-    rotation: 0
-
-    lambda: |-
-      const int W = 240;
-      const int H = 320;
-
-      // Layout
-      const int M = 8;                 // margin
-      const int HEADER_H = 44;
-      const int TAB_H = 40;
-      const int TAB_Y = H - TAB_H;
-
-      const int CONTENT_Y0 = HEADER_H;
-      const int CONTENT_Y1 = TAB_Y;
-
-      // 2-column grid
-      const int GAP = 8;
-      const int INNER_W = W - 2*M;     // 224
-      const int COL_W = (INNER_W - GAP) / 2; // 108
-      const int ROW_H = 56;            // card height
-
-      // Colors (pro look)
-      auto C_BG     = esphome::Color(10,10,12);
-      auto C_PANEL  = esphome::Color(22,22,26);
-      auto C_PANEL2 = esphome::Color(28,28,34);
-      auto C_STROKE = esphome::Color(60,60,70);
-      auto C_TEXT   = esphome::Color(240,240,240);
-      auto C_DIM    = esphome::Color(150,150,160);
-      auto C_ACC    = esphome::Color(255,200,40);   // accent (amber)
-      auto C_OK     = esphome::Color(60,220,120);
-      auto C_BAD    = esphome::Color(255,80,80);
-      auto C_CYAN   = esphome::Color(60,220,220);
-
-      auto fin = [&](float v)->bool { return std::isfinite(v); };
-
-      // helpers
-      auto panel = [&](int x,int y,int w,int h, bool strong=false) {
-        it.filled_rectangle(x,y,w,h, strong ? C_PANEL2 : C_PANEL);
-        it.rectangle(x,y,w,h, C_STROKE);
-      };
-
-      auto title = [&](const char* t) {
-        it.print(M, 10, id(tft_font_big), C_TEXT, t);
-      };
-
-      auto mode_pill = [&](int x,int y,const char* t, esphome::Color col) {
-        int pw = 56;
-        int ph = 22;
-        it.filled_rectangle(x,y,pw,ph, col);
-        it.rectangle(x,y,pw,ph, C_STROKE);
-        it.print(x+8, y+4, id(tft_font_small), esphome::Color(0,0,0), t);
-      };
-
-      auto card_value = [&](int x,int y,const char* label, float v, const char* unit, esphome::Color col) {
-        panel(x,y,COL_W,ROW_H);
-        it.print(x+8, y+6, id(tft_font_small), C_DIM, label);
-        if (fin(v)) {
-          // value line (fixed position, no overlap)
-          it.printf(x+8, y+26, id(tft_font_med), col, "%.1f%s", v, unit);
-        } else {
-          it.print(x+8, y+26, id(tft_font_med), C_DIM, "--");
-        }
-      };
-
-      auto card_text = [&](int x,int y,const char* label, const char* text, esphome::Color col) {
-        panel(x,y,COL_W,ROW_H);
-        it.print(x+8, y+6, id(tft_font_small), C_DIM, label);
-        it.print(x+8, y+26, id(tft_font_med), col, text);
-      };
-
-      auto btn = [&](int x,int y,int w,int h,const char* txt, bool active=false) {
-        it.filled_rectangle(x,y,w,h, active ? C_ACC : C_PANEL2);
-        it.rectangle(x,y,w,h, C_STROKE);
-        it.print(x+10, y+8, id(tft_font_small), active ? esphome::Color(0,0,0) : C_TEXT, txt);
-      };
-
-      // background
-      it.fill(C_BG);
-
-      // Header
-      if (id(ui_page)==0) title("HEAT");
-      else if (id(ui_page)==1) title("POOL");
-      else title("CONTROL");
-
-      // time right
-      if (id(ha_time).now().is_valid()) {
-        auto t = id(ha_time).now();
-        it.strftime(W-92, 12, id(tft_font_small), C_DIM, TextAlign::TOP_LEFT, "%H:%M:%S", t);
-      } else {
-        it.print(W-92, 12, id(tft_font_small), C_DIM, "--:--:--");
-      }
-
-      // Mode pill (short labels, no long strings)
-      // expects heizmodus_select.state in {"auto","summer","winter","pool"}
-      std::string sel = id(heizmodus_select).state;
-      const char* ml = "AUTO";
-      if (sel=="summer") ml="SUM";
-      else if (sel=="winter") ml="WIN";
-      else if (sel=="pool") ml="POOL";
-      mode_pill(W-64, 20, ml, (sel=="pool") ? C_CYAN : C_ACC);
-
-      // Content area coords
-      const int X0 = M;
-      const int X1 = M + COL_W + GAP;
-
-      int y = CONTENT_Y0 + 8;
-
-      // ======================
-      // PAGE 0: HEAT
-      // ======================
-      if (id(ui_page) == 0) {
-        // Row 1: AT / VL
-        card_value(X0, y, "OUTDOOR", id(outdoor).state, "C", C_TEXT);
-        card_value(X1, y, "VORLAUF",  id(vorlauftemperatur).state, "C", C_TEXT);
-        y += ROW_H + GAP;
-
-        // Row 2: WW / KS
-        card_value(X0, y, "WARM W.",  id(warmwassertemperatur).state, "C", C_TEXT);
-        card_value(X1, y, "KESSEL",   id(kesseltemperatur).state, "C", C_TEXT);
-        y += ROW_H + GAP;
-
-        // Row 3: Setpoints
-        card_value(X0, y, "VL-SOLL", id(zieltemperatur_input).state, "C", C_ACC);
-        card_value(X1, y, "WW-SOLL", id(warmwasser_zieltemperatur_input).state, "C", C_ACC);
-        y += ROW_H + GAP;
-
-        // Row 4: Status line (small, fixed)
-        panel(M, y, INNER_W, 44);
-        int sx = M + 8;
-        int sy = y + 12;
-
-        auto tag = [&](const char* t, bool on) {
-          it.filled_rectangle(sx, sy, 28, 20, on ? C_OK : C_PANEL2);
-          it.rectangle(sx, sy, 28, 20, C_STROKE);
-          it.print(sx+9, sy+4, id(tft_font_small), on ? esphome::Color(0,0,0) : C_DIM, t);
-          sx += 34;
-        };
-
-        tag("A", id(mischer_auf).state);
-        tag("Z", id(mischer_zu).state);
-        tag("HK", id(heizkreispumpe).state);
-        tag("WW", id(warmwasserpumpe).state);
-        tag("BR", id(brenner).state);
-      }
-
-      // ======================
-      // PAGE 1: POOL
-      // ======================
-      else if (id(ui_page) == 1) {
-        // Row 1: Temp / Flow
-        card_value(X0, y, "POOL TEMP", id(temp_sensor).state, "C", C_TEXT);
-        card_value(X1, y, "FLOW",      id(tuf2000m_flow_rate).state, "m3/h", C_TEXT);
-        y += ROW_H + GAP;
-
-        // Row 2: pH / ORP
-        panel(X0, y, COL_W, ROW_H);
-        it.print(X0+8, y+6, id(tft_font_small), C_DIM, "pH");
-        if (fin(id(ph_sensor).state)) it.printf(X0+8, y+26, id(tft_font_med), C_CYAN, "%.2f", id(ph_sensor).state);
-        else it.print(X0+8, y+26, id(tft_font_med), C_DIM, "--");
-
-        panel(X1, y, COL_W, ROW_H);
-        it.print(X1+8, y+6, id(tft_font_small), C_DIM, "ORP");
-        if (fin(id(orp_sensor).state)) it.printf(X1+8, y+26, id(tft_font_med), C_CYAN, "%.0f mV", id(orp_sensor).state);
-        else it.print(X1+8, y+26, id(tft_font_med), C_DIM, "--");
-        y += ROW_H + GAP;
-
-        // Row 3: Dosing / Filter
-        card_text(X0, y, "DOSING", id(dosierung_enable).state ? "ON" : "OFF", id(dosierung_enable).state ? C_OK : C_DIM);
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%s %.0f%%",
-                 id(filter_pumpe_enable_dac).state ? "ON" : "OFF",
-                 id(filter_pumpe_speed_pct).state);
-        card_text(X1, y, "FILTER", buf, id(filter_pumpe_enable_dac).state ? C_OK : C_DIM);
-        y += ROW_H + GAP;
-
-        // Row 4: Tank low flags
-        panel(M, y, INNER_W, 44);
-        bool low = id(chlor_low_level).state || id(ph_low_level).state;
-        it.print(M+8, y+6, id(tft_font_small), C_DIM, "TANK SAFETY");
-        it.printf(M+8, y+22, id(tft_font_med), low ? C_BAD : C_OK,
-                  "Chlor:%d  pH:%d", (int)id(chlor_low_level).state, (int)id(ph_low_level).state);
-      }
-
-      // ======================
-      // PAGE 2: CONTROL
-      // ======================
-      else {
-        // Row: VL setpoint controls
-        panel(M, y, INNER_W, 56);
-        it.print(M+8, y+6, id(tft_font_small), C_DIM, "VORLAUF SOLL");
-        it.printf(M+8, y+26, id(tft_font_med), C_ACC, "%.1fC", id(zieltemperatur_input).state);
-        btn(M+140, y+10, 40, 36, "-0.5");
-        btn(M+186, y+10, 40, 36, "+0.5");
-        y += 56 + GAP;
-
-        // Row: WW setpoint controls
-        panel(M, y, INNER_W, 56);
-        it.print(M+8, y+6, id(tft_font_small), C_DIM, "WARM W. SOLL");
-        it.printf(M+8, y+26, id(tft_font_med), C_ACC, "%.1fC", id(warmwasser_zieltemperatur_input).state);
-        btn(M+140, y+10, 40, 36, "-1");
-        btn(M+186, y+10, 40, 36, "+1");
-        y += 56 + GAP;
-
-        // Row: Mode buttons (2x2)
-        panel(M, y, INNER_W, 80);
-        it.print(M+8, y+6, id(tft_font_small), C_DIM, "MODE");
-        btn(M+8,   y+30, 52, 36, "AUTO", (sel=="auto"));
-        btn(M+68,  y+30, 52, 36, "SUM",  (sel=="summer"));
-        btn(M+128, y+30, 52, 36, "WIN",  (sel=="winter"));
-        btn(M+188, y+30, 44, 36, "POOL", (sel=="pool"));
-        y += 80 + GAP;
-
-        // Row: Pool controls
-        panel(M, y, INNER_W, 70);
-        it.print(M+8, y+6, id(tft_font_small), C_DIM, "POOL CONTROLS");
-
-        btn(M+8,   y+30, 70, 32, id(dosierung_enable).state ? "DOS OFF" : "DOS ON", id(dosierung_enable).state);
-        btn(M+86,  y+30, 60, 32, "SPD-5");
-        btn(M+152, y+30, 60, 32, "SPD+5");
-        btn(M+218, y+30, 14, 32, id(filter_pumpe_enable_dac).state ? "0" : "1", id(filter_pumpe_enable_dac).state);
-      }
-
-      // Tabbar
-      panel(0, TAB_Y, W, TAB_H, true);
-      const int TW = W/3;
-      auto tab = [&](int i, const char* t) {
-        int x = i*TW;
-        bool a = (id(ui_page)==i);
-        it.rectangle(x, TAB_Y, TW, TAB_H, a ? C_ACC : C_STROKE);
-        it.print(x+18, TAB_Y+12, id(tft_font_small), a ? C_ACC : C_TEXT, t);
-      };
-      tab(0,"HEAT");
-      tab(1,"POOL");
-      tab(2,"CTRL");
-
-  - platform: ssd1306_i2c
-    model: "SSD1306 128x64"
-    address: 0x3C
-    id: oled
-    update_interval: 2s
-    rotation: 0
-    lambda: |-
-      it.printf(0, 0, id(font_big), "AF");
-      it.printf(32, 0, id(font_big), "VL");
-      it.printf(64, 0, id(font_big), "WW");
-      it.printf(96, 0, id(font_big), "KF");
-      it.printf(0, 12, id(font_big), "%.1f", id(outdoor).state);
-      it.printf(32, 12, id(font_big), "%.1f", id(vorlauftemperatur).state);
-      it.printf(64, 12, id(font_big), "%.1f", id(warmwassertemperatur).state);
-      it.printf(96, 12, id(font_big), "%.1f", id(kesseltemperatur).state);
-      
-      std::string sel = id(heizmodus_select).state;
-      bool is_w_auto = id(saison_auto_is_winter);
-
-      // 2-Buchstaben-Kürzel:
-      // WI = Winter, SU = Sommer, AW = Auto(Winter), AS = Auto(Sommer), PO = Pool
-      const char* mode_short = "--";
-      if (sel == "pool")      mode_short = "PO";
-      else if (sel == "winter") mode_short = "WI";
-      else if (sel == "summer") mode_short = "SU";
-      else                      mode_short = is_w_auto ? "AW" : "AS";
-
-      it.printf(0, 24, id(font_small), "%s", mode_short);
-      it.printf(32, 24, id(font_big), "%.1f", id(zieltemperatur));
-      it.printf(64, 24, id(font_big), "%.1f", id(warmwasser_zieltemperatur));
-      it.printf(96, 24, id(font_big), "%.1f", id(vessel_soll));
-
-      // Startposition für die Zeile
-      int x = 0;
-      int y = 36; // z.B. unterste Zeile
-
-      // Mischer Auf ("A")
-      if (id(mischer_auf).state) {
-        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
-        it.printf(x+2, y, id(font_big), COLOR_OFF, "A");
-      } else {
-        it.printf(x+2, y, id(font_big), COLOR_ON, "A");
-      }
-      x += 14;
-
-      // Mischer Zu ("Z")
-      if (id(mischer_zu).state) {
-        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
-        it.printf(x+2, y, id(font_big), COLOR_OFF, "Z");
-      } else {
-        it.printf(x+2, y, id(font_big), COLOR_ON, "Z");
-      }
-      x += 14;
-
-      // Heizkreispumpe ("H")
-      if (id(heizkreispumpe).state) {
-        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
-        it.printf(x+2, y, id(font_big), COLOR_OFF, "H");
-      } else {
-        it.printf(x+2, y, id(font_big), COLOR_ON, "H");
-      }
-      x += 14;
-
-      // Warmwasserpumpe ("W")
-      if (id(warmwasserpumpe).state) {
-        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
-        it.printf(x+2, y, id(font_big), COLOR_OFF, "W");
-      } else {
-        it.printf(x+2, y, id(font_big), COLOR_ON, "W");
-      }
-      x += 14;
-
-      // Brenner ("B")
-      if (id(brenner).state) {
-        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
-        it.printf(x+2, y, id(font_big), COLOR_OFF, "B");
-      } else {
-        it.printf(x+2, y, id(font_big), COLOR_ON, "B");
-      }
-  
-touchscreen:
-  - platform: xpt2046
-    id: touch
-    spi_id: spi_touch
-    cs_pin: GPIO38
-    interrupt_pin: GPIO47
-    display: tft
-    update_interval: 30ms
-    threshold: 400
-
-    calibration:
-      x_min: 392
-      x_max: 3725
-      y_min: 423
-      y_max: 3791
-
-    transform:
-      swap_xy: false
-      mirror_x: false
-      mirror_y: true
-    on_touch:
-      then:
-        - lambda: |-
-            id(ui_touched) = true;
-            id(ui_last_x) = touch.x;
-            id(ui_last_y) = touch.y;
-
-            const uint32_t now = millis();
-            if (now - id(ui_last_touch_ms) < 150) return;
-            id(ui_last_touch_ms) = now;
-
-            const int x = touch.x;
-            const int y = touch.y;
-
-            // TABBAR: y >= 280
-            if (y >= 280) {
-              if (x < 80) id(ui_page) = 0;
-              else if (x < 160) id(ui_page) = 1;
-              else id(ui_page) = 2;
-              return;
-            }
-
-            // Only CTRL page has buttons
-            if (id(ui_page) != 2) return;
-
-            auto hit = [&](int x0,int y0,int w,int h)->bool {
-              return (x>=x0 && x<(x0+w) && y>=y0 && y<(y0+h));
-            };
-
-            // CTRL layout coordinates from display lambda:
-            // VL row panel starts at y=52, buttons at y=62..98
-            if (hit(148, 62, 40, 36)) { id(ui_vl_nudge).execute(-0.5f); return; }
-            if (hit(194, 62, 40, 36)) { id(ui_vl_nudge).execute(+0.5f); return; }
-
-            // WW row starts at y=116, buttons at y=126..162
-            if (hit(148, 126, 40, 36)) { id(ui_ww_nudge).execute(-1.0f); return; }
-            if (hit(194, 126, 40, 36)) { id(ui_ww_nudge).execute(+1.0f); return; }
-
-            // MODE panel starts at y=180, buttons at y=210..246
-            if (hit(16,  210, 52, 36)) { id(ui_set_mode).execute("auto"); return; }
-            if (hit(76,  210, 52, 36)) { id(ui_set_mode).execute("summer"); return; }
-            if (hit(136, 210, 52, 36)) { id(ui_set_mode).execute("winter"); return; }
-            if (hit(196, 210, 44, 36)) { id(ui_set_mode).execute("pool"); return; }
-
-            // POOL CONTROLS panel starts at y=268, buttons at y=298..330 (aber Tabbar beginnt bei 280)
-            // => wir legen die Pool-Control Buttons absichtlich in den Bereich y=238..270 (über Tabbar)
-            // Dafür bitte die Buttons im Display ggf. dort lassen – sonst nur Tabbar!
-            // Wenn du die Buttons so wie im Display oben belässt (y+30 bei y=268), liegen sie in Tabbar.
-            // Deshalb: in der Display-Lambda den Pool-Control-Panel y so setzen, dass es bei ~232 beginnt
-            // ODER: wir aktivieren hier nur SPD +/- und DOS in einem Bereich über der Tabbar:
-            //
-            // Quick-Fix Hitboxes (nur wenn du Pool Controls höher platzierst, z.B. y=232):
-            // if (hit(16,  262, 70, 32)) { id(ui_toggle_dosierung).execute(); return; }
-            // if (hit(94,  262, 60, 32)) { id(ui_filterpump_speed_nudge).execute(-5.0f); return; }
-            // if (hit(160, 262, 60, 32)) { id(ui_filterpump_speed_nudge).execute(+5.0f); return; }
-            // if (hit(226, 262, 14, 32)) { id(ui_toggle_filterpump).execute(); return; }
-
-    on_release:
-      then:
-        - lambda: |-
-            id(ui_touched) = false;
 
 globals:
-  - id: ui_page
-    type: int
-    restore_value: true
-    initial_value: "0"   # 0=HEAT, 1=POOL, 2=CTRL
-
-  - id: ui_touched
-    type: bool
-    initial_value: "false"
-
-  - id: ui_last_x
-    type: int
-    initial_value: "-1"
-  - id: ui_last_y
-    type: int
-    initial_value: "-1"
-
-  - id: ui_last_rawx
-    type: int
-    initial_value: "-1"
-  - id: ui_last_rawy
-    type: int
-    initial_value: "-1"
-
-  - id: ui_last_touch_ms
-    type: uint32_t
-    initial_value: "0"
-
   - id: last_hmi_mode_ms
     type: unsigned long
     restore_value: no
@@ -704,15 +250,15 @@ globals:
     initial_value: '40.0'
   - id: pid_integral
     type: float
-    restore_value: true
+    restore_value: false
     initial_value: '0.0'
   - id: pid_last_error
     type: float
-    restore_value: true
+    restore_value: false
     initial_value: '0.0'
   - id: pid_output
     type: float
-    restore_value: true
+    restore_value: false
     initial_value: '0.0'
   - id: pid_kp
     type: float
@@ -755,7 +301,7 @@ globals:
     initial_value: '50.0'
   - id: invalid_sensor_count
     type: int
-    restore_value: true
+    restore_value: false
     initial_value: '0'
   - id: warmwasser_zieltemperatur_backup
     type: float
@@ -841,41 +387,73 @@ globals:
 
   # --- Modbus temp guards: last valid, time, EMA, invalid counters ---
   # Vorlauf
-  - { id: g_vl_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_vl_last, type: float, restore_value: no, initial_value: NAN }
   - { id: g_vl_ms,   type: uint32_t, initial_value: "0" }
-  - { id: g_vl_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_vl_ema,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_vl_inv,  type: int, initial_value: "0" }
+  - id: g_vl_cand
+    type: float
+    restore_value: false
+    initial_value: "NAN"
+  - id: g_vl_cand_n
+    type: int
+    restore_value: false
+    initial_value: "0"
   # Kessel
-  - { id: g_k_last,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_k_last,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_k_ms,    type: uint32_t, initial_value: "0" }
-  - { id: g_k_ema,   type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_k_ema,   type: float, restore_value: no, initial_value: NAN }
   - { id: g_k_inv,   type: int, initial_value: "0" }
+  - id: g_k_cand
+    type: float
+    restore_value: false
+    initial_value: "NAN"
+  - id: g_k_cand_n
+    type: int
+    restore_value: false
+    initial_value: "0"
   # Warmwasser
-  - { id: g_ww_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_ww_last, type: float, restore_value: no, initial_value: NAN }
   - { id: g_ww_ms,   type: uint32_t, initial_value: "0" }
-  - { id: g_ww_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_ww_ema,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_ww_inv,  type: int, initial_value: "0" }
+  - id: g_ww_cand
+    type: float
+    restore_value: false
+    initial_value: "NAN"
+  - id: g_ww_cand_n
+    type: int
+    restore_value: false
+    initial_value: "0"
   # Außen
-  - { id: g_out_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_out_last, type: float, restore_value: no, initial_value: NAN }
   - { id: g_out_ms,   type: uint32_t, initial_value: "0" }
-  - { id: g_out_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_out_ema,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_out_inv,  type: int, initial_value: "0" }
+  - id: g_out_cand
+    type: float
+    restore_value: false
+    initial_value: "NAN"
+  - id: g_out_cand_n
+    type: int
+    restore_value: false
+    initial_value: "0"
   # Temp5..8
-  - { id: g_t5_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t5_last, type: float, restore_value: no, initial_value: NAN }
   - { id: g_t5_ms,   type: uint32_t, initial_value: "0" }
-  - { id: g_t5_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t5_ema,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_t5_inv,  type: int, initial_value: "0" }
-  - { id: g_t6_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t6_last, type: float, restore_value: no, initial_value: NAN }
   - { id: g_t6_ms,   type: uint32_t, initial_value: "0" }
-  - { id: g_t6_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t6_ema,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_t6_inv,  type: int, initial_value: "0" }
-  - { id: g_t7_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t7_last, type: float, restore_value: no, initial_value: NAN }
   - { id: g_t7_ms,   type: uint32_t, initial_value: "0" }
-  - { id: g_t7_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t7_ema,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_t7_inv,  type: int, initial_value: "0" }
-  - { id: g_t8_last, type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t8_last, type: float, restore_value: no, initial_value: NAN }
   - { id: g_t8_ms,   type: uint32_t, initial_value: "0" }
-  - { id: g_t8_ema,  type: float, restore_value: yes, initial_value: NAN }
+  - { id: g_t8_ema,  type: float, restore_value: no, initial_value: NAN }
   - { id: g_t8_inv,  type: int, initial_value: "0" }
 
   - id: reg_ewma_err2
@@ -936,6 +514,7 @@ globals:
     type: std::string
     restore_value: yes
     initial_value: '"auto"'
+
 
 select:
   - platform: template
@@ -1335,6 +914,22 @@ script:
           call.perform();
           ESP_LOGI("UI", "WW setpoint -> %.1f", nv);
 
+  - id: ui_curve_level_nudge
+    mode: restart
+    parameters:
+      delta: float
+    then:
+      - lambda: |-
+          float cur = id(curve_level);
+          if (!std::isfinite(cur)) cur = 0.0f;
+          float nv = cur + delta;
+          if (nv < -20.0f) nv = -20.0f;
+          if (nv > 30.0f) nv = 30.0f;
+          auto call = id(curve_level_num).make_call();
+          call.set_value(nv);
+          call.perform();
+          ESP_LOGI("UI", "Curve level -> %.1f", nv);
+
   - id: ui_set_mode
     mode: restart
     parameters:
@@ -1483,6 +1078,7 @@ button:
 sensor:
   - platform: wifi_signal
     name: "Heizung ESP32 WLAN Qualität"
+    id: wifi_signal_sensor
     update_interval: 60s
     unit_of_measurement: "%"
     accuracy_decimals: 0
@@ -1551,541 +1147,75 @@ sensor:
     lambda: |-
       return id(vessel_soll);
 
-  # ------------------ Vorlauf (0x0000) ------------------
-  # Public "clean" sensor (keeps same ID)
-  # - platform: template
-  #   id:  vorlauftemperatur
-  #   name: "Vorlauftemperatur"
-  #   unit_of_measurement: "°C"
-  #   device_class: temperature
-  #   state_class: measurement
-  #   accuracy_decimals: 1
-  #   update_interval: never
+  # # ------------------ Temp1 (0x0000) ------------------
   # - platform: modbus_controller
   #   modbus_controller_id: mb_ctrl
-  #   id: vl_raw
+  #   id: t1_raw
   #   internal: true
   #   register_type: holding
   #   address: 0x0000
   #   value_type: U_WORD
-  #   lambda: |-
-  #     const uint16_t reg = x;
-
-  #     // Fehlercode ausblenden
-  #     if (reg == 0x7FFF) {
-  #       ESP_LOGW("modbus","[VL] raw=0x7FFF -> invalid");
-  #       return NAN;
-  #     }
-
-  #     // ggf. hier weitere Codes filtern (z.B. 0xFFFF oder 0x0000), falls nötig
-  #     // if (reg == 0xFFFF || reg == 0x0000) {
-  #     //   ESP_LOGW("modbus","[VL] raw=0x%04X -> invalid", reg);
-  #     //   return NAN;
-  #     // }
-
-  #     return (float)reg * 0.1f;
   
-  #   on_value:
-  #     then:
-  #       - lambda: |-
-  #           const float v = x;  // aktuelles Sample
-  #           const float MIN = -40.0f;
-  #           const float MAX = 120.0f;
-  #           const float A   = 0.25f;   // Glättung
-
-  #           // einfache Plausibilitätsprüfung
-  #           if (!isfinite(v) || v < MIN || v > MAX) {
-  #             ESP_LOGW("modbus","[VL] invalid v=%.2f (out of bounds)", v);
-  #             return;
-  #           }
-
-  #           // Exponential Moving Average
-  #           if (isfinite(id(g_vl_ema))) {
-  #             id(g_vl_ema) += A * (v - id(g_vl_ema));
-  #           } else {
-  #             // erster gültiger Wert
-  #             id(g_vl_ema) = v;
-  #           }
-
-  #           float out = roundf(id(g_vl_ema) * 10.0f) / 10.0f;
-  #           id(vorlauftemperatur).publish_state(out);
-  
-
-  
-  # # ------------------ (0x0003) ------------------
+  # # ------------------ Temp2 (0x0001) ------------------
   # - platform: modbus_controller
   #   modbus_controller_id: mb_ctrl
-  #   id: kessel_alt_modbus
-  #   name: "Kesseltemperatur alt (Modbusboard)"
+  #   id: t2_raw
+  #   internal: true
+  #   register_type: holding
+  #   address: 0x0001
+  #   value_type: U_WORD
+  
+  # # ------------------ Temp3 (0x0002) ------------------
+  # - platform: modbus_controller
+  #   modbus_controller_id: mb_ctrl
+  #   id: t3_raw
+  #   internal: true
+  #   register_type: holding
+  #   address: 0x0002
+  #   value_type: U_WORD
+  # # ------------------ Temp4 (0x0003) ------------------
+  # - platform: modbus_controller
+  #   modbus_controller_id: mb_ctrl
+  #   id: t4_raw
+  #   internal: true
   #   register_type: holding
   #   address: 0x0003
+  #   value_type: U_WORD  
+  # # ------------------ Temp5 (0x0004) ------------------
+  # - platform: modbus_controller
+  #   modbus_controller_id: mb_ctrl
+  #   id: t5_raw
+  #   internal: true
+  #   register_type: holding
+  #   address: 0x0004
   #   value_type: U_WORD
-  #   unit_of_measurement: "°C"
-  #   device_class: temperature
-  #   accuracy_decimals: 1
-  #   lambda: |-
-  #     const uint16_t reg = x;
-  #     if (reg == 0x7FFF) {
-  #       ESP_LOGW("modbus","[K-alt] raw=0x7FFF -> invalid");
-  #       return NAN;
-  #     }
-  #     return (float)reg * 0.1f;
+ 
+  # # ------------------ Temp6 (0x0005) ------------------
+  # - platform: modbus_controller
+  #   modbus_controller_id: mb_ctrl
+  #   id: t6_raw
+  #   internal: true
+  #   register_type: holding
+  #   address: 0x0005
+  #   value_type: U_WORD
 
-
-  # ------------------ Warmwasser (0x0002) ------------------
-  - platform: template
-    id:  warmwassertemperatur
-    name: "Warmwassertemperatur"
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-  
-  - platform: modbus_controller
-    modbus_controller_id: mb_ctrl
-    id: ww_raw
-    internal: true
-    register_type: holding
-    address: 0x0002
-    value_type: U_WORD
-    lambda: |-
-      const uint16_t reg = x;
-      if (reg == 0x7FFF) { ESP_LOGW("modbus","[WW] raw=0x7FFF -> invalid"); return NAN; }
-      return (float)reg * 0.1f;
-  
-    on_value:
-      then:
-        - lambda: |-
-            const float v=id(ww_raw).state; const uint32_t now=millis();
-            const float MIN=0, MAX=75, MAXJ=3.0f, A=0.20f;
-            const uint32_t STALE=10UL*60UL*1000UL;
-            bool ok=isfinite(v)&&v>=MIN&&v<=MAX;
-            if(!ok) ESP_LOGW("modbus","[WW] reject bounds/NaN v=%.2f", v);
-            if(ok && isfinite(id(g_ww_last))){
-              float dv=fabsf(v-id(g_ww_last));
-              if(dv>MAXJ){ok=false; ESP_LOGW("modbus","[WW] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, MAXJ, id(g_ww_last), v);}
-            }
-            if(ok){
-              if(isfinite(id(g_ww_ema))) id(g_ww_ema)+=A*(v-id(g_ww_ema)); else id(g_ww_ema)=v;
-              float out=roundf(id(g_ww_ema)*10)/10.0f;
-              id(warmwassertemperatur).publish_state(out);
-              id(g_ww_last)=out; id(g_ww_ms)=now; id(g_ww_inv)=0;
-            } else {
-              id(g_ww_inv)++;
-              if(isfinite(id(g_ww_last)) && (id(g_ww_inv)>5 || (now-id(g_ww_ms))>STALE)){
-                ESP_LOGW("modbus","[WW] stale republish last=%.1f", id(g_ww_last));
-                id(warmwassertemperatur).publish_state(id(g_ww_last));
-              }
-            }
-  
-  # ------------------ Außen (0x0003) ------------------
-  - platform: template
-    id:  outdoor
-    name: "Aussentemperatur"
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-  
-  - platform: modbus_controller
-    modbus_controller_id: mb_ctrl
-    id: out_raw
-    internal: true
-    register_type: holding
-    address: 0x0006
-    value_type: U_WORD
-    lambda: |-
-      const uint16_t reg = x;
-      if (reg == 0x7FFF) { ESP_LOGW("modbus","[OUT] raw=0x7FFF -> invalid"); return NAN; }
-      return (float)reg * 0.1f;
-  
-    on_value:
-      then:
-        - lambda: |-
-            const float v = id(out_raw).state;
-            const uint32_t now = millis();
-
-            // --- guards & params ---
-            const float MIN=-50, MAX=60;
-            const float MAXJ=3.0f;         // spike limit between *accepted* points
-            const float A  = 0.30f;        // a bit faster smoothing
-            const uint32_t STALE=15UL*60UL*1000UL;
-
-            // Valid raw?
-            bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
-            if (!in_bounds) {
-              ESP_LOGW("modbus","[OUT] reject bounds/NaN v=%.2f", v);
-            }
-
-            // Step 1: compute spike vs last accepted
-            bool ok = in_bounds;
-            if (ok && isfinite(id(g_out_last))) {
-              float dv = fabsf(v - id(g_out_last));
-              if (dv > MAXJ) {
-                ok = false;  // looks like a spike for now
-                ESP_LOGW("modbus","[OUT] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, MAXJ, id(g_out_last), v);
-              }
-            }
-
-            // Step 2: accept policy
-            if (ok) {
-              // Normal path: EMA + publish
-              if (isfinite(id(g_out_ema))) id(g_out_ema) += A * (v - id(g_out_ema)); else id(g_out_ema) = v;
-              float out = roundf(id(g_out_ema)*10)/10.0f;
-              id(outdoor).publish_state(out);
-              id(g_out_last)=out; id(g_out_ms)=now; id(g_out_inv)=0;
-            } else {
-              // Rejection path
-              id(g_out_inv)++;
-
-              // (A) too many consecutive rejects -> treat as *step change* and accept
-              if (id(g_out_inv) > 5 && in_bounds) {
-                id(g_out_ema) = v;  // reseed EMA
-                float out = roundf(v*10)/10.0f;
-                id(outdoor).publish_state(out);
-                id(g_out_last)=out; id(g_out_ms)=now; id(g_out_inv)=0;
-                ESP_LOGW("modbus","[OUT] accepted step-change after %d rejects: %.1f°C",
-                         id(g_out_inv), out);
-                return;
-              }
-
-              // (B) stale accepted value -> force reseed with current in-bounds raw
-              if (in_bounds && isfinite(id(g_out_last)) && (now - id(g_out_ms) > STALE)) {
-                id(g_out_ema) = v;
-                float out = roundf(v*10)/10.0f;
-                id(outdoor).publish_state(out);
-                id(g_out_last)=out; id(g_out_ms)=now; id(g_out_inv)=0;
-                ESP_LOGW("modbus","[OUT] stale>15min -> reseeded to %.1f°C", out);
-                return;
-              }
-
-              // (C) otherwise: keep last value alive occasionally (your previous behavior)
-              if (isfinite(id(g_out_last)) && (id(g_out_inv)>5 || (now-id(g_out_ms))>STALE)) {
-                ESP_LOGW("modbus","[OUT] stale republish last=%.1f inv=%d age=%lus",
-                         id(g_out_last), id(g_out_inv), (unsigned long)((now-id(g_out_ms))/1000));
-                id(outdoor).publish_state(id(g_out_last));
-              }
-            }
-        - script.execute: saison_update_logic
-  
-  # ------------------ Temp5 (0x0004) ------------------
-  # Öffentlicher "clean" Sensor für HA
-  - platform: template
-    id: temp5
-    name: "Temp5"
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-
-  # Rohwert aus Modbus + Filterkette
-  - platform: modbus_controller
-    modbus_controller_id: mb_ctrl
-    id: t5_raw
-    internal: true
-    register_type: holding
-    address: 0x0004
-    value_type: U_WORD
-    lambda: |-
-      return x * 0.1f;
-    filters:
-      # 1) Median glättet einzelne Ausreißer
-      - median:
-          window_size: 5
-          send_every: 1
-          send_first_at: 1
-
-      # 2) Spike-Guard: große Sprünge werden rate-limited statt übernommen
-      - lambda: |-
-          static float last = NAN;
-          static uint32_t last_ms = 0;
-          const float MAX_JUMP = 3.0f;   // >3 K pro Sample = Spike
-          const float MAX_RATE = 0.8f;   // max. 0.8 K/s nach Spike
-          const uint32_t now = millis();
-          const float dt = last_ms ? (now - last_ms) / 1000.0f : 5.0f;
-
-          if (!isfinite(x)) return last;     // halte letzten guten Wert
-          if (!isfinite(last)) {             // Initialisierung
-            last = x; last_ms = now; return x;
-          }
-
-          float dx = x - last;
-          if (fabsf(dx) > MAX_JUMP) {        // Spike erkannt
-            float max_step = MAX_RATE * dt;  // begrenze Sprunghöhe
-            if (fabsf(dx) > max_step)
-              x = last + (dx > 0 ? max_step : -max_step);
-          }
-
-          last = x;
-          last_ms = now;
-          return x;
-
-      # 3) EMA fürs sanfte Nachziehen
-      - exponential_moving_average:
-          alpha: 0.2
-          send_every: 1
-
-    on_value:
-      then:
-        - lambda: |-
-            const float v = x;  // bereits gefilterter Wert
-
-            const float MIN = -40.0f;
-            const float MAX = 120.0f;
-
-            if (!isfinite(v) || v < MIN || v > MAX) {
-              ESP_LOGW("modbus", "[T5] invalid v=%.2f (out of bounds)", v);
-              return;
-            }
-
-            // Direkt an den Template-Sensor veröffentlichen
-            id(temp5).publish_state(v);
-  
-  # ------------------ Temp6 (0x0005) ------------------
-  - platform: template
-    id:  temp6
-    name: "Temp6"
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-  
-  - platform: modbus_controller
-    modbus_controller_id: mb_ctrl
-    id: t6_raw
-    internal: true
-    register_type: holding
-    address: 0x0005
-    value_type: U_WORD
-    lambda: |-
-      const uint16_t reg = x;
-      if (reg == 0x7FFF) { ESP_LOGW("modbus","[T6] raw=0x7FFF -> invalid"); return NAN; }
-      return (float)reg * 0.1f;
-    on_value:
-      then:
-        - lambda: |-
-            const float v = id(t6_raw).state;
-            const uint32_t now = millis();
-
-            // Parameter für T6
-            const float MIN = -40.0f, MAX = 120.0f;   // Bounds
-            const float A   = 0.20f;                  // EMA-Faktor
-            const uint32_t STALE_MS = 10UL * 60UL * 1000UL;  // 10 min
-
-            // 1) Bounds-/NaN-Check
-            bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
-            if (!in_bounds) {
-              ESP_LOGW("modbus","[T6] reject bounds/NaN v=%.2f", v);
-            }
-
-            // 2) Dynamische Spike-Schwelle (Basis 3K + 1K/Minute seit letztem validen Publish, max +10K)
-            float dyn_MAXJ = 3.0f;
-            if (id(g_t6_ms) != 0) {
-              uint32_t age_ms = now - id(g_t6_ms);
-              float age_min = age_ms / 60000.0f;
-              dyn_MAXJ += fminf(age_min * 1.0f, 10.0f);
-            }
-
-            // 3) Erste gültige Messung immer akzeptieren (Seed)
-            bool ok = in_bounds;
-            if (ok && !isfinite(id(g_t6_last))) {
-              id(g_t6_last) = v;   // Seed last
-              id(g_t6_ema)  = v;   // Seed EMA
-            }
-
-            // 4) Spike-Test ggü. letztem akzeptierten Wert (nur wenn Seed existiert)
-            if (ok && isfinite(id(g_t6_last))) {
-              float dv = fabsf(v - id(g_t6_last));
-              if (dv > dyn_MAXJ) {
-                ok = false;
-                ESP_LOGW("modbus","[T6] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, dyn_MAXJ, id(g_t6_last), v);
-              }
-            }
-
-            // 5) Annahme-/Ablehnungslogik inkl. Step-Change & Stale
-            if (ok) {
-              if (isfinite(id(g_t6_ema))) id(g_t6_ema) += A * (v - id(g_t6_ema)); else id(g_t6_ema) = v;
-              float out = roundf(id(g_t6_ema) * 10) / 10.0f;
-              id(temp6).publish_state(out);
-              id(g_t6_last) = out;
-              id(g_t6_ms)   = now;
-              id(g_t6_inv)  = 0;
-            } else {
-              id(g_t6_inv)++;
-
-              if (id(g_t6_inv) > 3 && in_bounds) {
-                id(g_t6_ema) = v;  // reseed auf neuen Level
-                float out = roundf(v * 10) / 10.0f;
-                id(temp6).publish_state(out);
-                id(g_t6_last) = out;
-                id(g_t6_ms)   = now;
-                id(g_t6_inv)  = 0;
-                ESP_LOGW("modbus","[T6] accepted step-change after %d rejects: %.1f°C", 3, out);
-                return;
-              }
-
-              if (in_bounds && isfinite(id(g_t6_last)) && (now - id(g_t6_ms) > STALE_MS)) {
-                id(g_t6_ema) = v;
-                float out = roundf(v * 10) / 10.0f;
-                id(temp6).publish_state(out);
-                id(g_t6_last) = out;
-                id(g_t6_ms)   = now;
-                id(g_t6_inv)  = 0;
-                ESP_LOGW("modbus","[T6] stale>10min -> reseeded to %.1f°C", out);
-                return;
-              }
-
-              if (isfinite(id(g_t6_last)) && (id(g_t6_inv) % 10) == 0) {
-                id(temp6).publish_state(id(g_t6_last));
-              }
-            }
-  # ------------------ Temp7 (0x0006) ------------------
-  # - platform: template
-  #   id:  temp7
-  #   name: "Temp7"
-  #   unit_of_measurement: "°C"
-  #   device_class: temperature
-  #   state_class: measurement
-  #   accuracy_decimals: 1
-  #   update_interval: never
-  
+  # # ------------------ Temp7 (0x0006) ------------------
   # - platform: modbus_controller
   #   modbus_controller_id: mb_ctrl
   #   id: t7_raw
   #   internal: true
   #   register_type: holding
-  #   address: 0x0001
+  #   address: 0x0006
   #   value_type: U_WORD
-  #   lambda: |-
-  #     const uint16_t reg = x;
-  #     if (reg == 0x7FFF) { ESP_LOGW("modbus","[T7] raw=0x7FFF -> invalid"); return NAN; }
-  #     return (float)reg * 0.1f;
-  #   on_value:
-  #     then:
-  #       - lambda: |-
-  #           const float v = id(t7_raw).state;
-  #           const uint32_t now = millis();
-
-  #           // Parameter für T7
-  #           const float MIN = -40.0f, MAX = 120.0f;  // Bounds
-  #           const float A   = 0.20f;                 // EMA-Faktor
-  #           const uint32_t STALE_MS = 10UL * 60UL * 1000UL;  // 10 min
-
-  #           // 1) Bounds-/NaN-Check
-  #           bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
-  #           if (!in_bounds) {
-  #             ESP_LOGW("modbus","[T7] reject bounds/NaN v=%.2f", v);
-  #           }
-
-  #           // 2) Dynamische Spike-Schwelle
-  #           float dyn_MAXJ = 3.0f;
-  #           if (id(g_t7_ms) != 0) {
-  #             uint32_t age_ms = now - id(g_t7_ms);
-  #             float age_min = age_ms / 60000.0f;
-  #             dyn_MAXJ += fminf(age_min * 1.0f, 10.0f);
-  #           }
-
-  #           // 3) Erste gültige Messung immer akzeptieren (Seed)
-  #           bool ok = in_bounds;
-  #           if (ok && !isfinite(id(g_t7_last))) {
-  #             id(g_t7_last) = v;
-  #             id(g_t7_ema)  = v;
-  #           }
-
-  #           // 4) Spike-Test
-  #           if (ok && isfinite(id(g_t7_last))) {
-  #             float dv = fabsf(v - id(g_t7_last));
-  #             if (dv > dyn_MAXJ) {
-  #               ok = false;
-  #               ESP_LOGW("modbus","[T7] spike Δ=%.2f>%.2f (%.2f->%.2f)", dv, dyn_MAXJ, id(g_t7_last), v);
-  #             }
-  #           }
-
-  #           // 5) Annahme-/Ablehnungslogik
-  #           if (ok) {
-  #             if (isfinite(id(g_t7_ema))) id(g_t7_ema) += A * (v - id(g_t7_ema)); else id(g_t7_ema) = v;
-  #             float out = roundf(id(g_t7_ema) * 10) / 10.0f;
-  #             id(temp7).publish_state(out);
-  #             id(g_t7_last) = out;
-  #             id(g_t7_ms)   = now;
-  #             id(g_t7_inv)  = 0;
-  #           } else {
-  #             id(g_t7_inv)++;
-
-  #             if (id(g_t7_inv) > 3 && in_bounds) {
-  #               id(g_t7_ema) = v;
-  #               float out = roundf(v * 10) / 10.0f;
-  #               id(temp7).publish_state(out);
-  #               id(g_t7_last) = out;
-  #               id(g_t7_ms)   = now;
-  #               id(g_t7_inv)  = 0;
-  #               ESP_LOGW("modbus","[T7] accepted step-change after %d rejects: %.1f°C", 3, out);
-  #               return;
-  #             }
-
-  #             if (in_bounds && isfinite(id(g_t7_last)) && (now - id(g_t7_ms) > STALE_MS)) {
-  #               id(g_t7_ema) = v;
-  #               float out = roundf(v * 10) / 10.0f;
-  #               id(temp7).publish_state(out);
-  #               id(g_t7_last) = out;
-  #               id(g_t7_ms)   = now;
-  #               id(g_t7_inv)  = 0;
-  #               ESP_LOGW("modbus","[T7] stale>10min -> reseeded to %.1f°C", out);
-  #               return;
-  #             }
-
-  #             if (isfinite(id(g_t7_last)) && (id(g_t7_inv) % 10) == 0) {
-  #               id(temp7).publish_state(id(g_t7_last));
-  #             }
-  #           }
   
-  # ------------------ Temp8 (0x0007) ------------------
-  - platform: template
-    id:  temp8
-    name: "Temp8"
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-  
-  - platform: modbus_controller
-    modbus_controller_id: mb_ctrl
-    id: t8_raw
-    internal: true
-    register_type: holding
-    address: 0x0007
-    value_type: U_WORD
-    lambda: |-
-      const uint16_t reg = x;
-      if (reg == 0x7FFF) { ESP_LOGW("modbus","[T8] raw=0x7FFF -> invalid"); return NAN; }
-      return (float)reg * 0.1f;
-    on_value:
-      then:
-        - lambda: |-
-            const float v=id(t8_raw).state; const uint32_t now=millis();
-            const float MIN=-40, MAX=120, MAXJ=300.0f, A=0.20f;
-            const uint32_t STALE=10UL*60UL*1000UL;
-            bool ok=isfinite(v)&&v>=MIN&&v<=MAX;
-            if(!ok) ESP_LOGW("modbus","[T8] reject v=%.2f", v);
-            if(ok && isfinite(id(g_t8_last))){
-              float dv=fabsf(v-id(g_t8_last));
-              if(dv>MAXJ){ok=false; ESP_LOGW("modbus","[T8] spike Δ=%.2f>%.2f", dv, MAXJ);}
-            }
-            if(ok){
-              if(isfinite(id(g_t8_ema))) id(g_t8_ema)+=A*(v-id(g_t8_ema)); else id(g_t8_ema)=v;
-              float out=roundf(id(g_t8_ema)*10)/10.0f;
-              id(temp8).publish_state(out);
-              id(g_t8_last)=out; id(g_t8_ms)=now; id(g_t8_inv)=0;
-            } else {
-              id(g_t8_inv)++;
-              if(isfinite(id(g_t8_last)) && (id(g_t8_inv)>5 || (now-id(g_t8_ms))>STALE))
-                id(temp8).publish_state(id(g_t8_last));
-            }
+  # # ------------------ Temp8 (0x0007) ------------------
+  # - platform: modbus_controller
+  #   modbus_controller_id: mb_ctrl
+  #   id: t8_raw
+  #   internal: true
+  #   register_type: holding
+  #   address: 0x0007
+  #   value_type: U_WORD
 
 
   # PTA8C04 – PT100 Temperaturen, je 0.1 °C, signed 16 bit
@@ -2144,234 +1274,6 @@ sensor:
 
   # - platform: modbus_controller
   #   modbus_controller_id: nt18b07
-  #   id: nt18b07_ch1_temp
-  #   name: "NT18B07 CH1 Temperatur"
-  #   register_type: holding
-  #   address: 0x0000
-  #   value_type: S_WORD
-  #   unit_of_measurement: "°C"
-  #   accuracy_decimals: 1
-  #   filters:
-  #     - multiply: 0.1
-
-  # ------------------ Kessel (NTC2 am NT18B07) ------------------
-  - platform: template
-    id:  kesseltemperatur
-    name: "Kesseltemperatur"
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-
-  - platform: modbus_controller
-    modbus_controller_id: nt18b07
-    id: k_ntc2_raw
-    internal: true
-    register_type: holding
-    address: 0x0001        # CH2 = NTC2
-    value_type: S_WORD
-    lambda: |-
-      const int16_t reg = x;
-
-      // Fehlercodes (ggf. an Datenblatt anpassen)
-      if (reg == 0x7FFF || reg == 0x8000) {
-        ESP_LOGW("modbus","[K NTC2] raw error=0x%04X", (uint16_t)reg);
-        return NAN;
-      }
-
-      float v = reg * 0.1f;   // 0.1 °C Auflösung
-
-      // grobe Plausibilitätsgrenzen für Kessel
-      const float MIN = -40.0f, MAX = 150.0f;
-      if (!isfinite(v) || v < MIN || v > MAX) {
-        ESP_LOGW("modbus","[K NTC2] out of range %.2f", v);
-        return NAN;
-      }
-
-      return v;
-
-    on_value:
-      then:
-        - lambda: |-
-            const float v   = x;              // bereits in °C
-            const uint32_t now = millis();
-
-            // --- Parameter ---
-            const float MIN = 0.0f, MAX = 110.0f;        // Plausible Kesselgrenzen
-            const float A   = 0.25f;                     // EMA-Faktor
-            const uint32_t STALE_MS = 10UL * 60UL * 1000UL;  // 10 min
-            const int STEP_REJECTS = 3;                  // nach 3 Ablehnungen Step-Change akzeptieren
-
-            // 1) Bounds/NaN
-            bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
-            if (!in_bounds) {
-              ESP_LOGW("modbus","[K] reject bounds/NaN v=%.2f", v);
-            }
-
-            // 2) Dynamische Spike-Schwelle:
-            //    Basis 4K + 1K/Minute seit letztem akzeptierten Publish, max +8K.
-            //    Wenn Brenner läuft, noch +3K Toleranz.
-            float dyn_MAXJ = 4.0f;
-            if (id(g_k_ms) != 0) {
-              uint32_t age_ms = now - id(g_k_ms);
-              float age_min = age_ms / 60000.0f;
-              dyn_MAXJ += fminf(age_min * 1.0f, 8.0f);
-            }
-            const bool burning = id(brenner).state || id(brennerbetrieb_bz).state;
-            if (burning) dyn_MAXJ += 3.0f;
-
-            // 3) Erste gültige Messung → Seed
-            bool ok = in_bounds;
-            if (ok && !isfinite(id(g_k_last))) {
-              id(g_k_last) = v;
-              id(g_k_ema)  = v;
-            }
-
-            // 4) Spike-Test ggü. letztem akzeptierten Wert
-            if (ok && isfinite(id(g_k_last))) {
-              float dv = fabsf(v - id(g_k_last));
-              if (dv > dyn_MAXJ) {
-                ok = false;
-                ESP_LOGW("modbus","[K] spike Δ=%.2f>%.2f (%.2f->%.2f)%s",
-                         dv, dyn_MAXJ, id(g_k_last), v, burning ? " (burning)" : "");
-              }
-            }
-
-            // 5) Annahme-/Ablehnungslogik mit Step-Change & Stale-Reseed
-            if (ok) {
-              if (isfinite(id(g_k_ema))) id(g_k_ema) += A * (v - id(g_k_ema)); else id(g_k_ema) = v;
-              float out = roundf(id(g_k_ema) * 10) / 10.0f;
-              id(kesseltemperatur).publish_state(out);
-              id(g_k_last) = out;
-              id(g_k_ms)   = now;
-              id(g_k_inv)  = 0;
-            } else {
-              id(g_k_inv)++;
-
-              // (A) Nach > STEP_REJECTS und gültigem Wert als Step-Change akzeptieren
-              if (id(g_k_inv) > STEP_REJECTS && in_bounds) {
-                id(g_k_ema) = v;  // reseed EMA auf neuen Level
-                float out = roundf(v * 10) / 10.0f;
-                id(kesseltemperatur).publish_state(out);
-                id(g_k_last) = out;
-                id(g_k_ms)   = now;
-                id(g_k_inv)  = 0;
-                ESP_LOGW("modbus","[K] accepted step-change after %d rejects: %.1f°C", STEP_REJECTS, out);
-                return;
-              }
-
-              // (B) Wenn letzter akzeptierter Wert zu alt ist → Reseed
-              if (in_bounds && isfinite(id(g_k_last)) && (now - id(g_k_ms) > STALE_MS)) {
-                id(g_k_ema) = v;
-                float out = roundf(v * 10) / 10.0f;
-                id(kesseltemperatur).publish_state(out);
-                id(g_k_last) = out;
-                id(g_k_ms)   = now;
-                id(g_k_inv)  = 0;
-                ESP_LOGW("modbus","[K] stale>10min -> reseeded to %.1f°C", out);
-                return;
-              }
-
-              // (C) Keep-alive: alle 10 Ablehnungen letzten Wert erneut publishen
-              if (isfinite(id(g_k_last)) && (id(g_k_inv) % 10) == 0) {
-                id(kesseltemperatur).publish_state(id(g_k_last));
-              }
-            }
-
-  # - platform: modbus_controller
-  #   modbus_controller_id: nt18b07
-  #   id: nt18b07_ch3_temp
-  #   name: "NT18B07 CH3 Temperatur"
-  #   register_type: holding
-  #   address: 0x0002
-  #   value_type: S_WORD
-  #   unit_of_measurement: "°C"
-  #   device_class: temperature
-  #   state_class: measurement
-  #   accuracy_decimals: 1
-  #   filters:
-  #     - lambda: |-
-  #         if ((int16_t)x == 0x7FFF || (int16_t)x == 0x8000) {
-  #           ESP_LOGW("modbus","[NT CH3] error raw=0x%04X", (int)x);
-  #           return NAN;
-  #         }
-  #         float v = x * 0.1f;
-  #         const float MIN = -40.0f, MAX = 120.0f;
-  #         if (!isfinite(v) || v < MIN || v > MAX) {
-  #           ESP_LOGW("modbus","[NT CH3] out of range %.2f", v);
-  #           return NAN;
-  #         }
-  #         return v;
-  #     - exponential_moving_average:
-  #         alpha: 0.3
-  #         send_every: 1
-
-# ------------------ Vorlauf (NT18B07 CH4 / 0x0003) ------------------
-# Public "clean" sensor (keeps same ID)
-  - platform: template
-    id: vorlauftemperatur
-    name: "Vorlauftemperatur"
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    accuracy_decimals: 1
-    update_interval: never
-  
-  # Rohwert aus NT18B07 (CH4) + Filterkette -> publish auf Template
-  - platform: modbus_controller
-    modbus_controller_id: nt18b07
-    id: vl_ntc_ch4_raw
-    internal: true
-    register_type: holding
-    address: 0x0003          # CH4
-    value_type: S_WORD       # signed 16-bit
-    lambda: |-
-      const int16_t reg = x;
-  
-      // typische Fehlercodes (ggf. an Datenblatt anpassen)
-      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
-        ESP_LOGW("modbus","[VL NTC CH4] raw error=0x%04X", (uint16_t)reg);
-        return NAN;
-      }
-  
-      float v = reg * 0.1f;   // 0.1°C Auflösung
-  
-      // Plausibilitätsgrenzen Vorlauf
-      const float MIN = -40.0f;
-      const float MAX = 120.0f;
-      if (!isfinite(v) || v < MIN || v > MAX) {
-        ESP_LOGW("modbus","[VL NTC CH4] out of range %.2f", v);
-        return NAN;
-      }
-  
-      return v;
-  
-    on_value:
-      then:
-        - lambda: |-
-            const float v = x;  // aktuelles Sample (°C)
-            const float MIN = -40.0f;
-            const float MAX = 120.0f;
-            const float A   = 0.25f;   // Glättung (EMA)
-  
-            if (!isfinite(v) || v < MIN || v > MAX) {
-              ESP_LOGW("modbus","[VL] invalid v=%.2f (out of bounds)", v);
-              return;
-            }
-  
-            // Exponential Moving Average (wie bisher über g_vl_ema)
-            if (isfinite(id(g_vl_ema))) {
-              id(g_vl_ema) += A * (v - id(g_vl_ema));
-            } else {
-              id(g_vl_ema) = v;  // erster gültiger Wert
-            }
-  
-            float out = roundf(id(g_vl_ema) * 10.0f) / 10.0f;
-            id(vorlauftemperatur).publish_state(out);
-
-  # - platform: modbus_controller
-  #   modbus_controller_id: nt18b07
   #   id: nt18b07_ch5_temp
   #   name: "NT18B07 CH5 Temperatur"
   #   register_type: holding
@@ -2405,24 +1307,591 @@ sensor:
   #   accuracy_decimals: 1
   #   filters:
   #     - multiply: 0.1
-      
-  # - platform: modbus_controller
-  #   modbus_controller_id: nt48a08
-  #   name: "NT48A08 NTC 1"
-  #   id: nt48a08_ntc1
-  #   register_type: holding
-  #   address: 0x0000
-  #   value_type: S_WORD
-  #   unit_of_measurement: "°C"
-  #   device_class: temperature
-  #   state_class: measurement
-  #   accuracy_decimals: 1
-  #   filters:
-  #     - multiply: 0.1
-  #     - lambda: |-
-  #         // -273.1°C (0xF555 bei manchen Modulen) / Ausreißer -> NaN
-  #         if (!isfinite(x) || x <= -100.0f || x >= 200.0f) return NAN;
-  #         return x;
+
+
+  # ------------------ Außen (NT48A08 NTC1 / 0x0000) ------------------
+  - platform: template
+    id: outdoor
+  #  name: "NT48A08 NTC1 Aussentemperatur"
+    name: "Aussentemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: out_raw
+    internal: true
+    register_type: holding
+    address: 0x0000
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[OUT NTC1] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f; // 0.1°C
+
+      const float MIN = -50.0f, MAX = 60.0f;
+      if (!isfinite(v) || v < MIN || v > MAX) {
+        ESP_LOGW("modbus","[OUT NTC1] out of range %.2f", v);
+        return NAN;
+      }
+
+      return v;
+
+    on_value:
+      then:
+        - lambda: |-
+            const float v = x;
+            const uint32_t now = millis();
+
+            const float MIN=-50.0f, MAX=60.0f;
+            const float MAXJ=3.0f;
+            const float A=0.30f;
+            const uint32_t STALE=15UL*60UL*1000UL;
+
+            const int SPIKE_CONFIRM = 3;  // accept spikes after 3 readings
+            const float CAND_EPS = 0.5f;  // "same candidate" tolerance
+
+            const bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
+            if (!in_bounds) {
+              ESP_LOGW("modbus","[OUT] reject bounds/NaN v=%.2f", v);
+              id(g_out_inv)++;
+              if (isfinite(id(g_out_last)) && ((now - id(g_out_ms)) > STALE)) {
+                ESP_LOGW("modbus","[OUT] stale>15min republish last=%.1f", id(g_out_last));
+                id(outdoor).publish_state(id(g_out_last));
+              }
+              return;
+            }
+
+            if (!isfinite(id(g_out_last))) {
+              id(g_out_last) = v;
+              id(g_out_ema)  = v;
+              id(g_out_ms)   = now;
+              id(g_out_inv)  = 0;
+              id(g_out_cand_n) = 0;
+              id(outdoor).publish_state(roundf(v * 10.0f) / 10.0f);
+              return;
+            }
+
+            const float dv = fabsf(v - id(g_out_last));
+            const bool is_spike = (dv > MAXJ);
+
+            if (!is_spike) {
+              id(g_out_cand_n) = 0;
+              if (isfinite(id(g_out_ema))) id(g_out_ema) += A * (v - id(g_out_ema));
+              else id(g_out_ema) = v;
+
+              const float out = roundf(id(g_out_ema) * 10.0f) / 10.0f;
+              id(outdoor).publish_state(out);
+              id(g_out_last) = out;
+              id(g_out_ms)   = now;
+              id(g_out_inv)  = 0;
+              return;
+            }
+
+            // candidate confirm
+            if (id(g_out_cand_n) == 0 || !isfinite(id(g_out_cand)) || fabsf(v - id(g_out_cand)) > CAND_EPS) {
+              id(g_out_cand)   = v;
+              id(g_out_cand_n) = 1;
+            } else {
+              id(g_out_cand_n)++;
+            }
+
+            ESP_LOGW("modbus","[OUT] spike Δ=%.2f>%.2f cand=%.2f n=%d",
+                     dv, MAXJ, id(g_out_cand), id(g_out_cand_n));
+
+            id(g_out_inv)++;
+
+            if (id(g_out_cand_n) >= SPIKE_CONFIRM) {
+              id(g_out_ema) = id(g_out_cand);
+              const float out = roundf(id(g_out_cand) * 10.0f) / 10.0f;
+              id(outdoor).publish_state(out);
+
+              id(g_out_last) = out;
+              id(g_out_ms)   = now;
+              id(g_out_inv)  = 0;
+              id(g_out_cand_n) = 0;
+
+              ESP_LOGW("modbus","[OUT] accepted step-change after %d confirms: %.1f°C", SPIKE_CONFIRM, out);
+              return;
+            }
+
+            if ((now - id(g_out_ms)) > STALE) {
+              id(g_out_ema) = v;
+              const float out = roundf(v * 10.0f) / 10.0f;
+              id(outdoor).publish_state(out);
+              id(g_out_last) = out;
+              id(g_out_ms)   = now;
+              id(g_out_inv)  = 0;
+              id(g_out_cand_n) = 0;
+              ESP_LOGW("modbus","[OUT] stale>15min -> forced reseed to %.1f°C", out);
+            }
+        - script.execute: saison_update_logic
+
+  # ------------------ Kessel (NT48A08 NTC2 / 0x0001) ------------------
+  - platform: template
+    id: kesseltemperatur
+  #  name: "NT48A08 NTC2 Kesseltemperatur"
+    name: "Kesseltemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: k_ntc2_raw
+    internal: true
+    register_type: holding
+    address: 0x0001
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[K NTC2] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f;
+
+      const float MIN = -40.0f, MAX = 150.0f;
+      if (!isfinite(v) || v < MIN || v > MAX) {
+        ESP_LOGW("modbus","[K NTC2] out of range %.2f", v);
+        return NAN;
+      }
+
+      return v;
+
+    on_value:
+      then:
+        - lambda: |-
+            const float v = x;
+            const uint32_t now = millis();
+
+            const float MIN = 0.0f, MAX = 110.0f;
+            const float A   = 0.25f;
+            const uint32_t STALE_MS = 10UL * 60UL * 1000UL;
+
+            const int SPIKE_CONFIRM = 3; // accept spikes after 3 readings
+            const float CAND_EPS = 0.6f;
+
+            const bool in_bounds = isfinite(v) && v >= MIN && v <= MAX;
+            if (!in_bounds) {
+              ESP_LOGW("modbus","[K] reject bounds/NaN v=%.2f", v);
+              id(g_k_inv)++;
+              return;
+            }
+
+            // dynamic MAXJ (baseline + age + burning)
+            float dyn_MAXJ = 4.0f;
+            if (id(g_k_ms) != 0) {
+              const uint32_t age_ms = now - id(g_k_ms);
+              const float age_min = age_ms / 60000.0f;
+              dyn_MAXJ += fminf(age_min * 1.0f, 8.0f);
+            }
+            const bool burning = id(brenner).state || id(brennerbetrieb_bz).state;
+            if (burning) dyn_MAXJ += 3.0f;
+
+            if (!isfinite(id(g_k_last))) {
+              id(g_k_last) = v;
+              id(g_k_ema)  = v;
+              id(g_k_ms)   = now;
+              id(g_k_inv)  = 0;
+              id(g_k_cand_n) = 0;
+              id(kesseltemperatur).publish_state(roundf(v * 10.0f) / 10.0f);
+              return;
+            }
+
+            const float dv = fabsf(v - id(g_k_last));
+            const bool is_spike = (dv > dyn_MAXJ);
+
+            if (!is_spike) {
+              id(g_k_cand_n) = 0;
+              if (isfinite(id(g_k_ema))) id(g_k_ema) += A * (v - id(g_k_ema));
+              else id(g_k_ema) = v;
+
+              const float out = roundf(id(g_k_ema) * 10.0f) / 10.0f;
+              id(kesseltemperatur).publish_state(out);
+              id(g_k_last) = out;
+              id(g_k_ms)   = now;
+              id(g_k_inv)  = 0;
+              return;
+            }
+
+            // candidate confirm
+            if (id(g_k_cand_n) == 0 || !isfinite(id(g_k_cand)) || fabsf(v - id(g_k_cand)) > CAND_EPS) {
+              id(g_k_cand)   = v;
+              id(g_k_cand_n) = 1;
+            } else {
+              id(g_k_cand_n)++;
+            }
+
+            ESP_LOGW("modbus","[K] spike Δ=%.2f>%.2f cand=%.2f n=%d%s",
+                     dv, dyn_MAXJ, id(g_k_cand), id(g_k_cand_n), burning ? " (burning)" : "");
+
+            id(g_k_inv)++;
+
+            if (id(g_k_cand_n) >= SPIKE_CONFIRM) {
+              id(g_k_ema) = id(g_k_cand);
+              const float out = roundf(id(g_k_cand) * 10.0f) / 10.0f;
+              id(kesseltemperatur).publish_state(out);
+
+              id(g_k_last) = out;
+              id(g_k_ms)   = now;
+              id(g_k_inv)  = 0;
+              id(g_k_cand_n) = 0;
+
+              ESP_LOGW("modbus","[K] accepted step-change after %d confirms: %.1f°C", SPIKE_CONFIRM, out);
+              return;
+            }
+
+            if ((now - id(g_k_ms)) > STALE_MS) {
+              id(g_k_ema) = v;
+              const float out = roundf(v * 10.0f) / 10.0f;
+              id(kesseltemperatur).publish_state(out);
+              id(g_k_last) = out;
+              id(g_k_ms)   = now;
+              id(g_k_inv)  = 0;
+              id(g_k_cand_n) = 0;
+              ESP_LOGW("modbus","[K] stale>10min -> forced reseed to %.1f°C", out);
+            }
+
+  # ------------------ Warmwasser (NT48A08 NTC3 / 0x0002) ------------------
+  - platform: template
+    id: warmwassertemperatur
+  #  name: "NT48A08 NTC3 Warmwassertemperatur"
+    name: "Warmwassertemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: ww_raw
+    internal: true
+    register_type: holding
+    address: 0x0002
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[WW NTC3] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f;
+
+      if (!isfinite(v) || v < -40.0f || v > 120.0f) {
+        ESP_LOGW("modbus","[WW NTC3] out of range %.2f", v);
+        return NAN;
+      }
+
+      return v;
+
+    on_value:
+      then:
+        - lambda: |-
+            const float v = x;
+            const uint32_t now = millis();
+
+            const float MIN=0.0f, MAX=75.0f;
+            const float MAXJ=3.0f;
+            const float A=0.20f;
+            const uint32_t STALE=10UL*60UL*1000UL;
+
+            const int SPIKE_CONFIRM = 3; // accept spikes after 3 readings
+            const float CAND_EPS = 0.5f;
+
+            const bool in_bounds = isfinite(v) && v>=MIN && v<=MAX;
+            if(!in_bounds){
+              ESP_LOGW("modbus","[WW] reject bounds/NaN v=%.2f", v);
+              id(g_ww_inv)++;
+              return;
+            }
+
+            if(!isfinite(id(g_ww_last))){
+              id(g_ww_last)=v; id(g_ww_ema)=v; id(g_ww_ms)=now; id(g_ww_inv)=0; id(g_ww_cand_n)=0;
+              id(warmwassertemperatur).publish_state(roundf(v*10.0f)/10.0f);
+              return;
+            }
+
+            const float dv=fabsf(v-id(g_ww_last));
+            const bool is_spike = (dv>MAXJ);
+
+            if(!is_spike){
+              id(g_ww_cand_n)=0;
+              if(isfinite(id(g_ww_ema))) id(g_ww_ema)+=A*(v-id(g_ww_ema)); else id(g_ww_ema)=v;
+              const float out=roundf(id(g_ww_ema)*10.0f)/10.0f;
+              id(warmwassertemperatur).publish_state(out);
+              id(g_ww_last)=out; id(g_ww_ms)=now; id(g_ww_inv)=0;
+              return;
+            }
+
+            if (id(g_ww_cand_n) == 0 || !isfinite(id(g_ww_cand)) || fabsf(v - id(g_ww_cand)) > CAND_EPS) {
+              id(g_ww_cand)   = v;
+              id(g_ww_cand_n) = 1;
+            } else {
+              id(g_ww_cand_n)++;
+            }
+
+            ESP_LOGW("modbus","[WW] spike Δ=%.2f>%.2f cand=%.2f n=%d",
+                     dv, MAXJ, id(g_ww_cand), id(g_ww_cand_n));
+
+            id(g_ww_inv)++;
+
+            if (id(g_ww_cand_n) >= SPIKE_CONFIRM) {
+              id(g_ww_ema)=id(g_ww_cand);
+              const float out=roundf(id(g_ww_cand)*10.0f)/10.0f;
+              id(warmwassertemperatur).publish_state(out);
+              id(g_ww_last)=out; id(g_ww_ms)=now; id(g_ww_inv)=0; id(g_ww_cand_n)=0;
+              ESP_LOGW("modbus","[WW] accepted step-change after %d confirms: %.1f°C", SPIKE_CONFIRM, out);
+              return;
+            }
+
+            if ((now - id(g_ww_ms)) > STALE) {
+              id(g_ww_ema)=v;
+              const float out=roundf(v*10.0f)/10.0f;
+              id(warmwassertemperatur).publish_state(out);
+              id(g_ww_last)=out; id(g_ww_ms)=now; id(g_ww_inv)=0; id(g_ww_cand_n)=0;
+              ESP_LOGW("modbus","[WW] stale>10min -> forced reseed to %.1f°C", out);
+            }
+
+  # ------------------ Vorlauf (NT48A08 NTC4 / 0x0003) ------------------
+  - platform: template
+    id: vorlauftemperatur
+  #  name: "NT48A08 NTC4 Vorlauftemperatur"
+    name: "Vorlauftemperatur"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: vl_ntc_ch4_raw
+    internal: true
+    register_type: holding
+    address: 0x0003
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[VL NTC4] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f;
+
+      const float MIN = -40.0f, MAX = 120.0f;
+      if (!isfinite(v) || v < MIN || v > MAX) {
+        ESP_LOGW("modbus","[VL NTC4] out of range %.2f", v);
+        return NAN;
+      }
+
+      return v;
+
+    on_value:
+      then:
+        - lambda: |-
+            const float v = x;
+            const uint32_t now = millis();
+
+            const float MIN=-40.0f, MAX=120.0f;
+            const float MAXJ=4.0f;          // Vorlauf darf schneller springen als außen/WW
+            const float A=0.25f;
+            const uint32_t STALE=5UL*60UL*1000UL;
+
+            const int SPIKE_CONFIRM = 3;     // accept spikes after 3 readings
+            const float CAND_EPS = 0.6f;
+
+            const bool in_bounds = isfinite(v) && v>=MIN && v<=MAX;
+            if(!in_bounds){
+              ESP_LOGW("modbus","[VL] reject bounds/NaN v=%.2f", v);
+              id(g_vl_inv)++;
+              return;
+            }
+
+            if(!isfinite(id(g_vl_last))){
+              id(g_vl_last)=v; id(g_vl_ema)=v; id(g_vl_ms)=now; id(g_vl_inv)=0; id(g_vl_cand_n)=0;
+              id(vorlauftemperatur).publish_state(roundf(v*10.0f)/10.0f);
+              return;
+            }
+
+            const float dv=fabsf(v-id(g_vl_last));
+            const bool is_spike = (dv>MAXJ);
+
+            if(!is_spike){
+              id(g_vl_cand_n)=0;
+              if(isfinite(id(g_vl_ema))) id(g_vl_ema)+=A*(v-id(g_vl_ema)); else id(g_vl_ema)=v;
+              const float out=roundf(id(g_vl_ema)*10.0f)/10.0f;
+              id(vorlauftemperatur).publish_state(out);
+              id(g_vl_last)=out; id(g_vl_ms)=now; id(g_vl_inv)=0;
+              return;
+            }
+
+            if (id(g_vl_cand_n) == 0 || !isfinite(id(g_vl_cand)) || fabsf(v - id(g_vl_cand)) > CAND_EPS) {
+              id(g_vl_cand)   = v;
+              id(g_vl_cand_n) = 1;
+            } else {
+              id(g_vl_cand_n)++;
+            }
+
+            ESP_LOGW("modbus","[VL] spike Δ=%.2f>%.2f cand=%.2f n=%d",
+                     dv, MAXJ, id(g_vl_cand), id(g_vl_cand_n));
+
+            id(g_vl_inv)++;
+
+            if (id(g_vl_cand_n) >= SPIKE_CONFIRM) {
+              id(g_vl_ema)=id(g_vl_cand);
+              const float out=roundf(id(g_vl_cand)*10.0f)/10.0f;
+              id(vorlauftemperatur).publish_state(out);
+              id(g_vl_last)=out; id(g_vl_ms)=now; id(g_vl_inv)=0; id(g_vl_cand_n)=0;
+              ESP_LOGW("modbus","[VL] accepted step-change after %d confirms: %.1f°C", SPIKE_CONFIRM, out);
+              return;
+            }
+
+            if ((now - id(g_vl_ms)) > STALE) {
+              id(g_vl_ema)=v;
+              const float out=roundf(v*10.0f)/10.0f;
+              id(vorlauftemperatur).publish_state(out);
+              id(g_vl_last)=out; id(g_vl_ms)=now; id(g_vl_inv)=0; id(g_vl_cand_n)=0;
+              ESP_LOGW("modbus","[VL] stale>5min -> forced reseed to %.1f°C", out);
+            }
+# ------------------ Rücklauf (NT48A08 NTC5 / 0x0004) ------------------  
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: ruecklauftemperatur
+    name: "NT48A08 NTC5 Rücklauftemperatur"
+    internal: false
+    register_type: holding
+    address: 0x0004
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[RL NTC5] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f;
+
+      const float MIN = -40.0f, MAX = 120.0f;
+      if (!isfinite(v) || v < MIN || v > MAX) {
+        ESP_LOGW("modbus","[RL NTC5] out of range %.2f", v);
+        return NAN;
+      }
+
+      return roundf(v * 10.0f) / 10.0f;
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+# ------------------ NTC6 / NTC7 / NTC8 (reserved) ------------------
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: ntc6_temp
+    name: "NT48A08 NTC6"
+    internal: false
+    register_type: holding
+    address: 0x0005
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[NTC6] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f;
+
+      const float MIN = -40.0f, MAX = 120.0f;
+      if (!isfinite(v) || v < MIN || v > MAX) {
+        ESP_LOGW("modbus","[NTC6] out of range %.2f", v);
+        return NAN;
+      }
+
+      return roundf(v * 10.0f) / 10.0f;
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: ntc7_temp
+    name: "NT48A08 NTC7"
+    internal: false
+    register_type: holding
+    address: 0x0006
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[NTC7] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f;
+
+      const float MIN = -40.0f, MAX = 120.0f;
+      if (!isfinite(v) || v < MIN || v > MAX) {
+        ESP_LOGW("modbus","[NTC7] out of range %.2f", v);
+        return NAN;
+      }
+
+      return roundf(v * 10.0f) / 10.0f;
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: modbus_controller
+    modbus_controller_id: nt48a08
+    id: ntc8_temp
+    name: "NT48A08 NTC8"
+    internal: false
+    register_type: holding
+    address: 0x0007
+    value_type: S_WORD
+    lambda: |-
+      const int16_t reg = x;
+
+      if (reg == (int16_t)0x7FFF || reg == (int16_t)0x8000) {
+        ESP_LOGW("modbus","[NTC8] raw error=0x%04X", (uint16_t)reg);
+        return NAN;
+      }
+
+      float v = reg * 0.1f;
+
+      const float MIN = -40.0f, MAX = 120.0f;
+      if (!isfinite(v) || v < MIN || v > MAX) {
+        ESP_LOGW("modbus","[NTC8] out of range %.2f", v);
+        return NAN;
+      }
+
+      return roundf(v * 10.0f) / 10.0f;
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
 
   # TUF2000M Flow Rate Sensor (Modbus RTU via separate RS485 UART)
   - platform: modbus_controller
@@ -2431,6 +1900,7 @@ sensor:
     id: tuf2000m_flow_rate
     register_type: holding
     address: 0x0001
+    register_count: 2
     value_type: FP32
     unit_of_measurement: "m³/h"
     device_class: volume_flow_rate

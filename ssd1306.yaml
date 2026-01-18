@@ -1,0 +1,80 @@
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    id: oled
+    update_interval: 2s
+    rotation: 0
+    lambda: |-
+      it.printf(0, 0, id(font_big), "AF");
+      it.printf(32, 0, id(font_big), "VL");
+      it.printf(64, 0, id(font_big), "WW");
+      it.printf(96, 0, id(font_big), "KF");
+      it.printf(0, 12, id(font_big), "%.1f", id(outdoor).state);
+      it.printf(32, 12, id(font_big), "%.1f", id(vorlauftemperatur).state);
+      it.printf(64, 12, id(font_big), "%.1f", id(warmwassertemperatur).state);
+      it.printf(96, 12, id(font_big), "%.1f", id(kesseltemperatur).state);
+      
+      std::string sel = id(heizmodus_select).state;
+      bool is_w_auto = id(saison_auto_is_winter);
+
+      // 2-Buchstaben-Kürzel:
+      // WI = Winter, SU = Sommer, AW = Auto(Winter), AS = Auto(Sommer), PO = Pool
+      const char* mode_short = "--";
+      if (sel == "pool")      mode_short = "PO";
+      else if (sel == "winter") mode_short = "WI";
+      else if (sel == "summer") mode_short = "SU";
+      else                      mode_short = is_w_auto ? "AW" : "AS";
+
+      it.printf(0, 24, id(font_small), "%s", mode_short);
+      it.printf(32, 24, id(font_big), "%.1f", id(zieltemperatur));
+      it.printf(64, 24, id(font_big), "%.1f", id(warmwasser_zieltemperatur));
+      it.printf(96, 24, id(font_big), "%.1f", id(vessel_soll));
+
+      // Startposition für die Zeile
+      int x = 0;
+      int y = 36; // z.B. unterste Zeile
+
+      // Mischer Auf ("A")
+      if (id(mischer_auf).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "A");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "A");
+      }
+      x += 14;
+
+      // Mischer Zu ("Z")
+      if (id(mischer_zu).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "Z");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "Z");
+      }
+      x += 14;
+
+      // Heizkreispumpe ("H")
+      if (id(heizkreispumpe).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "H");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "H");
+      }
+      x += 14;
+
+      // Warmwasserpumpe ("W")
+      if (id(warmwasserpumpe).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "W");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "W");
+      }
+      x += 14;
+
+      // Brenner ("B")
+      if (id(brenner).state) {
+        it.filled_rectangle(x, y, 10, 12, COLOR_ON);
+        it.printf(x+2, y, id(font_big), COLOR_OFF, "B");
+      } else {
+        it.printf(x+2, y, id(font_big), COLOR_ON, "B");
+      }

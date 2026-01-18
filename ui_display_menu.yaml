@@ -1,0 +1,391 @@
+# ui_display_menu.yaml
+# Graphical Display Menu (ohne LVGL) + Touch-Softkeys
+# ILI9341 240x320 (ili9xxx) + XPT2046 (IRQ GPIO47)
+
+globals:
+  - id: ui_last_touch_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+  # robust: wir tracken menu aktiv selbst (keine Abhängigkeit von Methoden im Lambda)
+  - id: ui_menu_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
+# ---------- Colors (ROBUST) ----------
+color:
+  - id: ui_bg
+    hex: "070B12"
+  - id: ui_hdr
+    hex: "0B1220"
+  - id: ui_card
+    hex: "0B1424"
+  - id: ui_btn
+    hex: "0F1726"
+  - id: ui_border
+    hex: "22324B"
+  - id: ui_txt
+    hex: "E7EEF9"
+  - id: ui_muted
+    hex: "9FB0C8"
+  - id: ui_red
+    hex: "FF3B30"
+  - id: ui_yellow
+    hex: "FFCC00"
+  - id: ui_blue
+    hex: "2B6FFF"
+
+# ---------- Fonts ----------
+font:
+  - file: "gfonts://Roboto"
+    id: ui_font_m
+    size: 16
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-().,/_'
+  - file: "gfonts://Roboto"
+    id: ui_font_s
+    size: 12
+    glyphs: ' 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß°%:+-().,/_'
+
+# ---------- Small internal helpers ----------
+sensor:
+  - platform: wifi_signal
+    id: ui_wifi_rssi
+    internal: true
+    update_interval: 10s
+
+# ---------- Display ----------
+display:
+  - platform: ili9xxx
+    id: tft
+    model: ili9341
+    spi_id: spi_tft
+    cs_pin: GPIO8
+    dc_pin: GPIO48
+    reset_pin: GPIO14
+    invert_colors: false
+    data_rate: 10MHz          # wenn stabil: 20/27/40MHz testen
+    rotation: 0
+    color_palette: 8BIT
+    update_interval: never
+    auto_clear_enabled: false
+
+    pages:
+      - id: page_main
+        lambda: |-
+          // helper formatters
+          auto f1 = [&](float v)->std::string {
+            if (!std::isfinite(v)) return std::string("-");
+            char b[16]; snprintf(b, sizeof(b), "%.1f°C", v);
+            return std::string(b);
+          };
+
+          auto draw_header = [&](){
+            it.filled_rectangle(0, 0, 240, 44, id(ui_hdr));
+            it.print(10, 12, id(ui_font_m), id(ui_txt), "Heizung");
+
+            // B = gelb wenn Relay, rot wenn BZ (Priorität)
+            const bool br_relay = id(brenner).state;
+            const bool br_bz    = id(brennerbetrieb_bz).state;
+            Color bcol = id(ui_muted);
+            if (br_bz) bcol = id(ui_red);
+            else if (br_relay) bcol = id(ui_yellow);
+            it.print(160, 12, id(ui_font_m), bcol, "B");
+
+            it.print(185, 12, id(ui_font_m), id(heizkreispumpe).state ? id(ui_red) : id(ui_muted), "H");
+            it.print(205, 12, id(ui_font_m), id(warmwasserpumpe).state ? id(ui_red) : id(ui_muted), "W");
+
+            // WiFi (klein, rechts unten im Header)
+            it.filled_rectangle(0, 44, 240, 1, id(ui_border));
+            float rssi = id(ui_wifi_rssi).state;
+            char wb[16];
+            if (std::isfinite(rssi)) snprintf(wb, sizeof(wb), "WiFi %.0f", rssi);
+            else snprintf(wb, sizeof(wb), "WiFi -");
+            it.print(10, 30, id(ui_font_s), id(ui_muted), wb);
+          };
+
+          auto draw_softkeys = [&](){
+            // Bottom softkey area: y=256..319 (2 rows x 32px, 3 cols x 80px)
+            it.filled_rectangle(0, 256, 240, 64, id(ui_bg));
+
+            auto key = [&](int col, int row, const char* label, Color fill){
+              const int x = col * 80;
+              const int y = 256 + row * 32;
+              it.filled_rectangle(x+2, y+2, 76, 28, fill);
+              it.rectangle(x+2, y+2, 76, 28, id(ui_border));
+              it.print(x+10, y+10, id(ui_font_s), id(ui_txt), label);
+            };
+
+            key(0, 0, "UP",   id(ui_btn));
+            key(1, 0, "OK",   id(ui_blue));
+            key(2, 0, "BACK", id(ui_btn));
+            key(0, 1, "LEFT", id(ui_btn));
+            key(1, 1, "DOWN", id(ui_btn));
+            key(2, 1, "RIGHT",id(ui_btn));
+          };
+
+          // ===== MENU ACTIVE: menu render + softkeys =====
+          if (id(ui_menu_active)) {
+            it.fill(id(ui_bg));
+            // Menu in oberen Bereich 0..255
+            it.menu(0, 0, id(ui_menu), 240, 256);
+            draw_softkeys();
+            return;
+          }
+
+          // ===== STATUS SCREEN =====
+          it.fill(id(ui_bg));
+          draw_header();
+
+          // Vorlauf
+          it.filled_rectangle(8, 52, 224, 64, id(ui_card));
+          it.rectangle(8, 52, 224, 64, id(ui_border));
+          it.print(14, 58, id(ui_font_s), id(ui_muted), "Vorlauf");
+          it.print(14, 78, id(ui_font_m), id(ui_txt), f1(id(vorlauftemperatur).state).c_str());
+
+          // Sollwerte
+          it.filled_rectangle(8, 122, 224, 64, id(ui_card));
+          it.rectangle(8, 122, 224, 64, id(ui_border));
+          it.print(14, 128, id(ui_font_s), id(ui_muted), "Soll VL / Soll WW");
+          std::string svl = f1(id(zieltemperatur_input).state);
+          std::string sww = f1(id(warmwasser_zieltemperatur_input).state);
+          std::string line = std::string("VL ") + svl + "   WW " + sww;
+          it.print(14, 148, id(ui_font_m), id(ui_txt), line.c_str());
+
+          // Modus
+          it.filled_rectangle(8, 192, 224, 44, id(ui_card));
+          it.rectangle(8, 192, 224, 44, id(ui_border));
+          it.print(14, 198, id(ui_font_s), id(ui_muted), "Modus");
+          it.print(14, 212, id(ui_font_m), id(ui_txt), id(heizmodus_select).state.c_str());
+
+          // MENU Button
+          it.filled_rectangle(8, 244, 224, 40, id(ui_blue));
+          it.rectangle(8, 244, 224, 40, id(ui_border));
+          it.print(88, 258, id(ui_font_m), id(ui_txt), "MENU");
+
+# ---------- Touch ----------
+touchscreen:
+  - platform: xpt2046
+    id: touch
+    spi_id: spi_touch
+    cs_pin: GPIO38
+    interrupt_pin:
+      number: GPIO47
+      mode: INPUT_PULLUP
+    display: tft
+    update_interval: 150ms
+    threshold: 400
+    calibration:
+      x_min: 392
+      x_max: 3725
+      y_min: 423
+      y_max: 3791
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: true
+
+# ---------- Graphical Display Menu ----------
+graphical_display_menu:
+  - id: ui_menu
+    font: ui_font_m
+    foreground_color: ui_txt
+    background_color: ui_bg
+    active: false
+    mode: joystick
+    on_redraw:
+      then:
+        - component.update: tft
+
+    items:
+      - type: menu
+        text: "Heizung"
+        items:
+          - type: select
+            text: "Modus"
+            select: heizmodus_select
+          - type: number
+            text: "VL Soll"
+            number: zieltemperatur_input
+            format: "%.1f"
+          - type: number
+            text: "WW Soll"
+            number: warmwasser_zieltemperatur_input
+            format: "%.1f"
+          - type: back
+            text: "Back"
+
+      - type: menu
+        text: "Pool"
+        items:
+          - type: switch
+            text: "Filterpumpe"
+            switch: filter_pumpe_enable_dac
+            on_text: "EIN"
+            off_text: "AUS"
+          - type: number
+            text: "Speed %"
+            number: filter_pumpe_speed_pct
+            format: "%.0f"
+          - type: switch
+            text: "Dosierung"
+            switch: dosierung_enable
+            on_text: "EIN"
+            off_text: "AUS"
+          - type: back
+            text: "Back"
+
+      - type: command
+        text: "Exit"
+        on_value:
+          then:
+            - display_menu.hide: ui_menu
+            - lambda: 'id(ui_menu_active) = false;'
+            - component.update: tft
+
+# ---------- Touch zones ----------
+binary_sensor:
+  # MENU button (Status Screen)
+  - platform: touchscreen
+    id: ui_btn_menu
+    x_min: 8
+    x_max: 232
+    y_min: 244
+    y_max: 284
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_menu_active);'
+            then:
+              - display_menu.hide: ui_menu
+              - lambda: 'id(ui_menu_active) = false;'
+            else:
+              - display_menu.show: ui_menu
+              - lambda: 'id(ui_menu_active) = true;'
+        - component.update: tft
+
+  # Softkeys area: y=256..319 (2 rows, 3 cols)
+  # Row0: UP / OK / BACK
+  - platform: touchscreen
+    id: ui_key_up
+    x_min: 0
+    x_max: 79
+    y_min: 256
+    y_max: 287
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_menu_active);'
+            then:
+              - display_menu.up: ui_menu
+
+  - platform: touchscreen
+    id: ui_key_ok
+    x_min: 80
+    x_max: 159
+    y_min: 256
+    y_max: 287
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_menu_active);'
+            then:
+              - display_menu.enter: ui_menu
+            else:
+              - display_menu.show: ui_menu
+              - lambda: 'id(ui_menu_active) = true;'
+              - component.update: tft
+
+  - platform: touchscreen
+    id: ui_key_back
+    x_min: 160
+    x_max: 239
+    y_min: 256
+    y_max: 287
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_menu_active);'
+            then:
+              - display_menu.hide: ui_menu
+              - lambda: 'id(ui_menu_active) = false;'
+              - component.update: tft
+
+  # Row1: LEFT / DOWN / RIGHT
+  - platform: touchscreen
+    id: ui_key_left
+    x_min: 0
+    x_max: 79
+    y_min: 288
+    y_max: 319
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_menu_active);'
+            then:
+              - display_menu.left: ui_menu
+
+  - platform: touchscreen
+    id: ui_key_down
+    x_min: 80
+    x_max: 159
+    y_min: 288
+    y_max: 319
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_menu_active);'
+            then:
+              - display_menu.down: ui_menu
+
+  - platform: touchscreen
+    id: ui_key_right
+    x_min: 160
+    x_max: 239
+    y_min: 288
+    y_max: 319
+    on_press:
+      then:
+        - lambda: 'id(ui_last_touch_ms) = millis();'
+        - if:
+            condition:
+              lambda: 'return id(ui_menu_active);'
+            then:
+              - display_menu.right: ui_menu
+
+# ---------- Refresh policy ----------
+# Menü rendert sich selbst via on_redraw -> component.update
+# Statusscreen nur bei "recent touch" updaten, damit Loop-time ruhig bleibt
+interval:
+  - interval: 5s
+    startup_delay: 2s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              if (id(ui_menu_active)) return false;
+              return (millis() - id(ui_last_touch_ms) < 15000);
+          then:
+            - component.update: tft
+
+# ---------- Initial draw (als Package OK: wird einfach zusätzlich ausgeführt) ----------
+esphome:
+  on_boot:
+    priority: -100
+    then:
+      - delay: 1500ms
+      - display.page.show: page_main
+      - component.update: tft
