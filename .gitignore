@@ -4,3 +4,5 @@
 /.esphome/
 /secrets.yaml
 secrets.yaml
+arduino-pool/build/
+.DS_Store
